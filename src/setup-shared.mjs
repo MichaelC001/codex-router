@@ -1,8 +1,12 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { closeSync, existsSync, openSync, readSync, writeSync } from "node:fs";
-import os from "node:os";
+import { closeSync, openSync, readSync, writeSync } from "node:fs";
 import path from "node:path";
 
+import {
+  grokCliFailureMessage,
+  grokCliPath,
+  grokCliPreflight,
+} from "./grok-cli.mjs";
 import {
   KIMI_CLI_INSTALL_URL,
   KIMI_CLI_NPM_PACKAGE,
@@ -246,13 +250,7 @@ function onboardKimiOauth() {
 }
 
 function onboardGrokOauth() {
-  let grok = executable("grok");
-  const installed = path.join(
-    process.env.GROK_HOME || path.join(os.homedir(), ".grok"),
-    "bin",
-    "grok",
-  );
-  if (!grok && existsSync(installed)) grok = installed;
+  let grok = grokCliPath();
   if (!grok) {
     const npm = executable("npm");
     if (!npm || !confirm("Install the official Grok CLI with `npm install -g @xai-official/grok`?")) {
@@ -261,10 +259,11 @@ function onboardGrokOauth() {
       );
     }
     tryRun(npm, ["install", "-g", "@xai-official/grok"]);
-    grok = executable("grok");
-    if (!grok && existsSync(installed)) grok = installed;
+    grok = grokCliPath();
   }
   if (!grok) throw new Error("The official Grok CLI was installed but could not be located.");
+  const preflight = grokCliPreflight({ executable: grok });
+  if (!preflight.runnable) throw new Error(grokCliFailureMessage(preflight));
   for (let attempt = 0; attempt < MAX_LOGIN_ATTEMPTS; attempt += 1) {
     if (!confirm("Run `grok login --oauth` now?")) {
       throw new Error("Grok OAuth setup was cancelled.");

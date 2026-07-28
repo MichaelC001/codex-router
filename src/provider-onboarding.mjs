@@ -3,6 +3,11 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  grokCliFailureMessage,
+  grokCliPath,
+  grokCliPreflight,
+} from "./grok-cli.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { KIMI_CLI_NPM_PACKAGE } from "./kimi-oauth-onboarding.mjs";
 import { PROVIDERS } from "./model-registry.mjs";
@@ -20,10 +25,6 @@ const OAUTH_CLIS = Object.freeze({
     executable: "grok",
     npmPackage: "@xai-official/grok",
     loginArgs: ["login", "--oauth"],
-    candidates: [
-      path.join(os.homedir(), ".npm-global", "bin", "grok"),
-      path.join(process.env.GROK_HOME || path.join(os.homedir(), ".grok"), "bin", "grok"),
-    ],
   },
 });
 
@@ -44,6 +45,7 @@ function commandPath(name) {
 export function oauthCliPath(providerId) {
   const cli = OAUTH_CLIS[providerId];
   if (!cli) throw new Error(`Unknown OAuth provider: ${providerId}`);
+  if (providerId === "grok-oauth") return grokCliPath();
   const discovered = commandPath(cli.executable);
   if (discovered) return discovered;
   return cli.candidates.find((candidate) => existsSync(candidate));
@@ -65,7 +67,11 @@ export function providerOnboardingSnapshot() {
   return {
     providers: [...PROVIDERS.values()].map((provider) => {
       if (provider.kind === "oauth") {
-        const cliInstalled = Boolean(oauthCliPath(provider.id));
+        const cliPath = oauthCliPath(provider.id);
+        const cli = provider.id === "grok-oauth"
+          ? grokCliPreflight({ executable: cliPath })
+          : { installed: Boolean(cliPath), runnable: Boolean(cliPath) };
+        const cliInstalled = cli.installed;
         const configured = oauthConfigured(provider.id);
         return {
           id: provider.id,
@@ -73,7 +79,14 @@ export function providerOnboardingSnapshot() {
           kind: "oauth",
           configured,
           cliInstalled,
-          action: !cliInstalled ? "install" : configured ? "ready" : "login",
+          cliRunnable: cli.runnable,
+          action: !cliInstalled
+            ? "install"
+            : !cli.runnable
+              ? "blocked"
+              : configured
+                ? "ready"
+                : "login",
         };
       }
       const configured = credentialStatus(provider, { persistent: true }).configured;
@@ -103,7 +116,15 @@ function npmPath() {
 export function installOauthCli(providerId) {
   const cli = OAUTH_CLIS[providerId];
   if (!cli) throw new Error(`Unknown OAuth provider: ${providerId}`);
-  if (oauthCliPath(providerId)) return;
+  if (providerId === "grok-oauth") {
+    const preflight = grokCliPreflight();
+    if (preflight.installed) {
+      if (!preflight.runnable) throw new Error(grokCliFailureMessage(preflight));
+      return;
+    }
+  } else if (oauthCliPath(providerId)) {
+    return;
+  }
   const npm = npmPath();
   if (!npm) throw new Error("Node.js and npm are required to install this provider CLI.");
   const result = spawnSync(npm, ["install", "-g", cli.npmPackage], {
@@ -113,7 +134,10 @@ export function installOauthCli(providerId) {
   if (result.error || result.status !== 0) {
     throw new Error(`Could not install the official ${cli.executable} CLI.`);
   }
-  if (!oauthCliPath(providerId)) {
+  if (providerId === "grok-oauth") {
+    const preflight = grokCliPreflight();
+    if (!preflight.runnable) throw new Error(grokCliFailureMessage(preflight));
+  } else if (!oauthCliPath(providerId)) {
     throw new Error(`The official ${cli.executable} CLI was installed but could not be located.`);
   }
 }
@@ -121,6 +145,10 @@ export function installOauthCli(providerId) {
 export function loginOauthProvider(providerId) {
   const executable = oauthCliPath(providerId);
   if (!executable) throw new Error("Install the provider CLI before signing in.");
+  if (providerId === "grok-oauth") {
+    const preflight = grokCliPreflight({ executable });
+    if (!preflight.runnable) throw new Error(grokCliFailureMessage(preflight));
+  }
   const result = spawnSync(executable, oauthLoginArgs(providerId), {
     encoding: "utf8",
     env: process.env,
