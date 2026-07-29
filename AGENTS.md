@@ -30,7 +30,12 @@ user.
    arguments, logs, environment snippets, or tracked files.
 4. Determine which provider IDs the user requested: `anthropic-api`,
    `kimi-oauth`, `kimi-api`, `deepseek`, `grok-api`, `qwen-plan`,
-   `zai-coding`, and/or `ollama-cloud`. If they did not specify and
+   `zai-coding`, `ollama-cloud`, and/or `minimax-token-plan`. The
+   catalog-only providers `groq`, `openrouter`, `together`, `fireworks`,
+   `cerebras`, `mistral`, `nvidia-nim`, `siliconflow`, `huggingface`, and
+   `gemini-api` are also selectable, but they ship no preselected models: after
+   the key is stored, the user must run `bin/curate-models PROVIDER` in an
+   interactive terminal to choose models. If they did not specify and
    credentials already exist, use
    `configured` rather than showing providers that cannot authenticate.
 5. For Kimi OAuth, reuse a valid `kimi login` session. If login is needed, run

@@ -6,6 +6,8 @@ import { ensureFreshKimiOAuthToken, kimiIdentityHeaders } from "./kimi-oauth-ses
 import { kimiOAuthStatus } from "./oauth-status.mjs";
 import { PROVIDERS } from "./model-registry.mjs";
 import { resolveProviderCredential } from "./provider-credentials.mjs";
+import { cooldownUntil } from "./rate-limit-headers.mjs";
+import { rateLimitSnapshotFor } from "./rate-limit-state.mjs";
 import { VERSION } from "./version.mjs";
 
 const REQUEST_TIMEOUT_MS = 8_000;
@@ -20,7 +22,7 @@ function resetTimestamp(value) {
   return Number.isFinite(milliseconds) ? milliseconds / 1_000 : undefined;
 }
 
-function quotaMetric(label, detail) {
+function quotaMetric(label, detail, unit = "requests") {
   const limit = numberValue(detail?.limit);
   const used = numberValue(detail?.used);
   const remaining = numberValue(detail?.remaining);
@@ -40,7 +42,7 @@ function quotaMetric(label, detail) {
     used: resolvedUsed,
     limit,
     remaining: Number.isFinite(remaining) ? remaining : Math.max(0, limit - resolvedUsed),
-    unit: "requests",
+    unit,
     ...(resetTimestamp(detail?.resetTime ?? detail?.reset_time ?? detail?.resetAt) !== undefined
       ? { resetAt: resetTimestamp(detail?.resetTime ?? detail?.reset_time ?? detail?.resetAt) }
       : {}),
@@ -283,6 +285,36 @@ function localOnly(message) {
   return { status: "local-only", source: "local-router", metrics: [], message };
 }
 
+// Providers without a documented balance endpoint still report the caller's
+// current window on every response header. Those observations are recorded by
+// the forwarder, so a provider shows real quota cards once it has served one
+// request — no extra API call and no per-provider integration.
+function headerQuota(providerId) {
+  const snapshot = rateLimitSnapshotFor(providerId);
+  if (!snapshot) return undefined;
+  const metrics = [
+    quotaMetric("Request limit", snapshot.requests, "requests"),
+    quotaMetric("Token limit", snapshot.tokens, "tokens"),
+  ].filter(Boolean);
+  if (!metrics.length) return undefined;
+  return {
+    status: "available",
+    source: "response-headers",
+    metrics,
+    observedAt: resetTimestamp(snapshot.observedAt),
+    ...(cooldownUntil(snapshot) !== undefined
+      ? { cooldownUntil: resetTimestamp(cooldownUntil(snapshot)) }
+      : {}),
+    message: "Reported by the provider on its most recent response",
+  };
+}
+
+// Prefer a real account balance; fall back to the observed response headers
+// before degrading to router-traffic-only.
+function withHeaderQuota(providerId, fallback) {
+  return headerQuota(providerId) || fallback;
+}
+
 const ZAI_QUOTA_URL =
   process.env.ZAI_QUOTA_URL || "https://api.z.ai/api/monitor/usage/quota/limit";
 const ZAI_PLAN_DASHBOARD_URL = "https://z.ai/manage-apikey/coding-plan/personal/my-plan";
@@ -382,12 +414,18 @@ async function accountUsageFor(providerId, fetchImpl) {
     if (providerId === "grok-oauth") return await grokOAuthAccount(fetchImpl);
     if (providerId === "grok-api") {
       return resolveProviderCredential("grok-api")
-        ? localOnly("xAI API account balance is unavailable; showing router traffic")
+        ? withHeaderQuota(
+            providerId,
+            localOnly("xAI API account balance is unavailable; showing router traffic"),
+          )
         : { status: "not-configured", source: "official-api", metrics: [] };
     }
     if (providerId === "anthropic-api") {
       return resolveProviderCredential("anthropic-api")
-        ? localOnly("Anthropic API account balance is unavailable; showing router traffic")
+        ? withHeaderQuota(
+            providerId,
+            localOnly("Anthropic API account balance is unavailable; showing router traffic"),
+          )
         : { status: "not-configured", source: "official-api", metrics: [] };
     }
     if (providerId === "zai-coding") return await zaiCodingAccount(fetchImpl);
@@ -396,7 +434,10 @@ async function accountUsageFor(providerId, fetchImpl) {
       // import browser cookies. Link to the console instead.
       return resolveProviderCredential("qwen-plan")
         ? {
-            ...localOnly("Alibaba shows plan quotas only in its console; showing router traffic"),
+            ...withHeaderQuota(
+              providerId,
+              localOnly("Alibaba shows plan quotas only in its console; showing router traffic"),
+            ),
             dashboardUrl: QWEN_PLAN_DASHBOARD_URL,
           }
         : { status: "not-configured", source: "official-api", metrics: [] };
@@ -404,12 +445,17 @@ async function accountUsageFor(providerId, fetchImpl) {
     if (providerId === "ollama-cloud") {
       return resolveProviderCredential("ollama-cloud")
         ? {
-            ...localOnly("Ollama shows account usage only on ollama.com; showing router traffic"),
+            ...withHeaderQuota(
+              providerId,
+              localOnly("Ollama shows account usage only on ollama.com; showing router traffic"),
+            ),
             dashboardUrl: OLLAMA_DASHBOARD_URL,
           }
         : { status: "not-configured", source: "official-api", metrics: [] };
     }
-    return localOnly("Showing router traffic");
+    // Every remaining provider — including the catalog-only ones — reports its
+    // window through response headers or shows router traffic alone.
+    return withHeaderQuota(providerId, localOnly("Showing router traffic"));
   } catch (error) {
     return {
       status: "unavailable",

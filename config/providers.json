@@ -176,6 +176,199 @@
         ],
         "prompt": "MiniMax Token Plan API key"
       }
+    },
+    {
+      "id": "groq",
+      "displayName": "Groq",
+      "kind": "openai-compatible",
+      "ownedBy": "groq",
+      "baseUrl": "https://api.groq.com/openai/v1",
+      "baseUrlEnv": "GROQ_API_BASE_URL",
+      "credential": {
+        "environment": [
+          "GROQ_API_KEY"
+        ],
+        "file": "groq-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-groq"
+        ],
+        "prompt": "Groq API key"
+      }
+    },
+    {
+      "id": "openrouter",
+      "displayName": "OpenRouter",
+      "kind": "openai-compatible",
+      "ownedBy": "openrouter",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "baseUrlEnv": "OPENROUTER_API_BASE_URL",
+      "credential": {
+        "environment": [
+          "OPENROUTER_API_KEY"
+        ],
+        "file": "openrouter-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-openrouter"
+        ],
+        "prompt": "OpenRouter API key"
+      }
+    },
+    {
+      "id": "together",
+      "displayName": "Together AI",
+      "kind": "openai-compatible",
+      "ownedBy": "together",
+      "baseUrl": "https://api.together.xyz/v1",
+      "baseUrlEnv": "TOGETHER_API_BASE_URL",
+      "credential": {
+        "environment": [
+          "TOGETHER_API_KEY"
+        ],
+        "file": "together-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-together"
+        ],
+        "prompt": "Together AI API key"
+      }
+    },
+    {
+      "id": "fireworks",
+      "displayName": "Fireworks AI",
+      "kind": "openai-compatible",
+      "ownedBy": "fireworks",
+      "baseUrl": "https://api.fireworks.ai/inference/v1",
+      "baseUrlEnv": "FIREWORKS_API_BASE_URL",
+      "credential": {
+        "environment": [
+          "FIREWORKS_API_KEY"
+        ],
+        "file": "fireworks-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-fireworks"
+        ],
+        "prompt": "Fireworks AI API key"
+      }
+    },
+    {
+      "id": "cerebras",
+      "displayName": "Cerebras",
+      "kind": "openai-compatible",
+      "ownedBy": "cerebras",
+      "baseUrl": "https://api.cerebras.ai/v1",
+      "baseUrlEnv": "CEREBRAS_API_BASE_URL",
+      "credential": {
+        "environment": [
+          "CEREBRAS_API_KEY"
+        ],
+        "file": "cerebras-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-cerebras"
+        ],
+        "prompt": "Cerebras API key"
+      }
+    },
+    {
+      "id": "mistral",
+      "displayName": "Mistral AI",
+      "kind": "openai-compatible",
+      "ownedBy": "mistral",
+      "baseUrl": "https://api.mistral.ai/v1",
+      "baseUrlEnv": "MISTRAL_API_BASE_URL",
+      "credential": {
+        "environment": [
+          "MISTRAL_API_KEY"
+        ],
+        "file": "mistral-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-mistral"
+        ],
+        "prompt": "Mistral AI API key"
+      }
+    },
+    {
+      "id": "nvidia-nim",
+      "displayName": "NVIDIA NIM",
+      "kind": "openai-compatible",
+      "ownedBy": "nvidia",
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "baseUrlEnv": "NVIDIA_NIM_BASE_URL",
+      "credential": {
+        "environment": [
+          "NVIDIA_API_KEY",
+          "NVIDIA_NIM_API_KEY"
+        ],
+        "file": "nvidia-nim-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-nvidia-nim"
+        ],
+        "prompt": "NVIDIA NIM API key"
+      }
+    },
+    {
+      "id": "siliconflow",
+      "displayName": "SiliconFlow",
+      "kind": "openai-compatible",
+      "ownedBy": "siliconflow",
+      "baseUrl": "https://api.siliconflow.cn/v1",
+      "baseUrlEnv": "SILICONFLOW_BASE_URL",
+      "credential": {
+        "environment": [
+          "SILICONFLOW_API_KEY"
+        ],
+        "file": "siliconflow-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-siliconflow"
+        ],
+        "prompt": "SiliconFlow API key"
+      }
+    },
+    {
+      "id": "huggingface",
+      "displayName": "Hugging Face Router",
+      "kind": "openai-compatible",
+      "ownedBy": "huggingface",
+      "baseUrl": "https://router.huggingface.co/v1",
+      "baseUrlEnv": "HUGGINGFACE_BASE_URL",
+      "credential": {
+        "environment": [
+          "HF_TOKEN",
+          "HUGGINGFACE_API_KEY"
+        ],
+        "file": "huggingface-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-huggingface"
+        ],
+        "prompt": "Hugging Face access token"
+      }
+    },
+    {
+      "id": "gemini-api",
+      "displayName": "Google Gemini API",
+      "kind": "openai-compatible",
+      "ownedBy": "google",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "baseUrlEnv": "GEMINI_API_BASE_URL",
+      "credential": {
+        "environment": [
+          "GEMINI_API_KEY",
+          "GOOGLE_API_KEY"
+        ],
+        "file": "gemini-api-key.secret",
+        "legacyFiles": [],
+        "keychainServices": [
+          "codex-router-gemini-api"
+        ],
+        "prompt": "Google Gemini API key"
+      }
     }
   ],
   "models": [

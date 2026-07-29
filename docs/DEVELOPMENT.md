@@ -11,6 +11,8 @@
 - `src/grok-oauth-forwarder.mjs` adapts Grok CLI OAuth to OpenAI-compatible chat.
 - `src/api-forwarder.mjs` is shared by all API-key providers.
 - `src/provider-credentials.mjs` isolates environment, file, and Keychain lookup.
+- `src/rate-limit-headers.mjs` parses provider rate-limit headers into snapshots.
+- `src/rate-limit-state.mjs` stores the latest observed window per provider.
 - `src/provider-selection.mjs` controls which tested models enter the picker.
 - `src/start.mjs` supervises the loopback processes.
 - `src/service-*.mjs` install per-user services for macOS, Linux, and Windows.

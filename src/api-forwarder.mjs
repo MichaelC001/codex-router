@@ -15,6 +15,8 @@ import {
   PROVIDERS,
   providerForModel,
 } from "./model-registry.mjs";
+import { parseRateLimitHeaders } from "./rate-limit-headers.mjs";
+import { recordRateLimitSnapshot } from "./rate-limit-state.mjs";
 import { readProviderSelection } from "./provider-selection.mjs";
 import {
   credentialStatus,
@@ -298,6 +300,13 @@ async function handleRequest(request, response) {
     signal: controller.signal,
   });
   await pipeResponse(upstream, response);
+  // Harvest the provider's own quota report from the response it just sent.
+  // Costs no extra request and works for any provider that emits the standard
+  // headers, so a newly added provider reports limits without bespoke code.
+  // Recorded after the body streams because persisting is synchronous I/O and
+  // must never sit in time-to-first-byte.
+  const rateLimit = parseRateLimitHeaders(upstream.headers);
+  if (rateLimit) recordRateLimitSnapshot(normalized.provider.id, rateLimit);
   if (!QUIET) {
     console.error(
       `[api-forwarder] provider=${normalized.provider.id} model=${normalized.model.upstreamModel} status=${upstream.status} duration_ms=${Date.now() - startedAt}`,

@@ -136,6 +136,54 @@ removable by re-running the command and deselecting). Curated models are
 local to your machine and are not vetted by the repository's compatibility
 tests.
 
+### Catalog-only providers
+
+These OpenAI-compatible providers are registered for routing and credential
+isolation but ship no preselected models, because their catalogs change too
+often for the repository to pin and live-verify individual entries:
+
+| Provider | Provider ID | Base URL |
+| --- | --- | --- |
+| Groq | `groq` | `https://api.groq.com/openai/v1` |
+| OpenRouter | `openrouter` | `https://openrouter.ai/api/v1` |
+| Together AI | `together` | `https://api.together.xyz/v1` |
+| Fireworks AI | `fireworks` | `https://api.fireworks.ai/inference/v1` |
+| Cerebras | `cerebras` | `https://api.cerebras.ai/v1` |
+| Mistral AI | `mistral` | `https://api.mistral.ai/v1` |
+| NVIDIA NIM | `nvidia-nim` | `https://integrate.api.nvidia.com/v1` |
+| SiliconFlow | `siliconflow` | `https://api.siliconflow.cn/v1` |
+| Hugging Face Router | `huggingface` | `https://router.huggingface.co/v1` |
+| Google Gemini API | `gemini-api` | `https://generativelanguage.googleapis.com/v1beta/openai` |
+
+Add a key, then pick the models you want from the provider's live catalog:
+
+```sh
+./bin/model-router codex provider-key groq set
+./bin/curate-models groq
+```
+
+Curated entries carry conservative default metadata and are local to your
+machine. Verify a model before relying on it:
+
+```sh
+./bin/test-model 'groq/MODEL_ID' --live --yes
+```
+
+Each base URL is overridable through the provider's `baseUrlEnv` variable, so a
+regional endpoint or a self-hosted gateway can reuse the same provider entry.
+
+Quota cards work for these providers without any extra configuration. Most
+OpenAI-compatible services report the caller's remaining window on every
+response through `x-ratelimit-*` headers, and Anthropic reports the same facts
+under an `anthropic-ratelimit-*` prefix. The router reads those headers as
+traffic passes through, so a provider starts showing real request and token
+limits after its first request — no balance endpoint, no extra API call, and no
+separate credential. Providers that publish no such headers, including Google
+Gemini, keep showing router traffic only.
+Gemini is routed through Google's OpenAI-compatible surface rather than the
+native Gemini protocol, so it shares the existing forwarder and needs no
+separate adapter.
+
 Only enabled providers appear in an app's picker. Each target has its own
 selection and API-key files:
 

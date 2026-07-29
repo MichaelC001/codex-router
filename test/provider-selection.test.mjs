@@ -9,8 +9,12 @@ process.env.CODEX_HOME = path.join(testRoot, "codex");
 process.env.CODEX_ROUTER_STATE_DIR = path.join(testRoot, "state");
 process.env.KIMI_CODE_HOME = path.join(testRoot, "kimi-code");
 process.env.GROK_AUTH_PATH = path.join(testRoot, "grok", "auth.json");
-for (const name of ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "KIMI_API_KEY", "MINIMAX_API_KEY", "MINIMAX_TOKEN_PLAN_API_KEY", "MOONSHOT_API_KEY", "XAI_API_KEY", "GROK_API_KEY"]) {
-  delete process.env[name];
+const { PROVIDERS } = await import("../src/model-registry.mjs");
+// Clearing every registry-declared credential variable keeps the "no provider
+// is configured yet" assertions deterministic on a developer machine that has
+// real keys exported, and stays correct as providers are added.
+for (const provider of PROVIDERS.values()) {
+  for (const name of provider.credential?.environment || []) delete process.env[name];
 }
 
 const { writeProviderCredential } = await import("../src/provider-credentials.mjs");
@@ -28,18 +32,9 @@ const { privateFileIsProtected } = await import("../src/file-security.mjs");
 
 test("provider selection keeps backward compatibility and can hide the final provider", () => {
   try {
-    assert.deepEqual(readProviderSelection(), [
-      "kimi-oauth",
-      "kimi-api",
-      "deepseek",
-      "grok-oauth",
-      "grok-api",
-      "anthropic-api",
-      "zai-coding",
-      "qwen-plan",
-      "ollama-cloud",
-      "minimax-token-plan",
-    ]);
+    // No selection file means every registry provider stays visible; the
+    // credential-aware catalog is what hides providers that cannot authenticate.
+    assert.deepEqual(readProviderSelection(), [...PROVIDERS.keys()]);
     process.env.KIMI_API_KEY = "TEST_ENVIRONMENT_ONLY_KEY";
     assert.deepEqual(configuredProviderIds(), []);
     delete process.env.KIMI_API_KEY;
