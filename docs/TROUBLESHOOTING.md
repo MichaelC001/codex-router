@@ -80,9 +80,9 @@ not offer a safe per-app bypass for this failure. Until xAI publishes an
 official CLI build that Windows allows, use the API-key provider instead:
 
 ```powershell
-./bin/model-router codex provider-key grok-api set
-./bin/model-router codex providers enable grok-api
-./bin/model-router codex doctor
+./model-router.ps1 codex provider-key grok-api set
+./model-router.ps1 codex providers enable grok-api
+./model-router.ps1 codex doctor
 ```
 
 An OAuth session created while the executable was allowed is not a durable
