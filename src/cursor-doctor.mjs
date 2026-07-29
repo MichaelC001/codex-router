@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { validCallerSecret } from "./caller-auth.mjs";
 import { privateFileIsProtected } from "./file-security.mjs";
+import { grokCliPreflight } from "./grok-cli.mjs";
 import { PROVIDERS } from "./model-registry.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { kimiOAuthStatus } from "./oauth-status.mjs";
@@ -195,11 +196,17 @@ add(
   "Run kimi login, then rerun the doctor.",
 );
 const grokOauth = grokOAuthStatus();
+const grokCli = grokCliPreflight();
+const grokOauthReady = grokOauth.configured && grokCli.runnable;
 add(
-  grokOauth.configured ? "ok" : selection.providers.includes("grok-oauth") ? "fail" : "warn",
+  grokOauthReady ? "ok" : selection.providers.includes("grok-oauth") ? "fail" : "warn",
   "Grok OAuth",
-  grokOauth.configured ? grokOauth.source : `not configured; ${grokOauth.setup}`,
-  "Run grok login, then rerun the doctor.",
+  !grokCli.runnable
+    ? grokCli.detail
+    : grokOauth.configured
+      ? grokOauth.source
+      : `not configured; ${grokOauth.setup}`,
+  !grokCli.runnable ? grokCli.fix : "Run grok login, then rerun the doctor.",
 );
 for (const provider of PROVIDERS.values()) {
   if (provider.kind !== "openai-compatible") continue;

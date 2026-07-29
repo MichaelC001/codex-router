@@ -65,6 +65,30 @@ Codex Router reads the official Kimi CLI credential under `$KIMI_CODE_HOME` or
 `~/.kimi-code` and refreshes it under a cross-process lock. Do not copy the OAuth
 token into Codex config, an API-key file, or an environment variable.
 
+## Windows blocks the Grok OAuth CLI
+
+On Windows, first confirm that the installed official CLI can launch:
+
+```powershell
+grok --version
+```
+
+If that command reports `spawn UNKNOWN`, "An Application Control policy has
+blocked this file," or a Smart App Control notification, Grok OAuth cannot
+complete login or refresh its session. Keep Smart App Control enabled; it does
+not offer a safe per-app bypass for this failure. Until xAI publishes an
+official CLI build that Windows allows, use the API-key provider instead:
+
+```powershell
+./model-router.ps1 codex provider-key grok-api set
+./model-router.ps1 codex providers enable grok-api
+./model-router.ps1 codex doctor
+```
+
+An OAuth session created while the executable was allowed is not a durable
+workaround. The router invokes the official CLI again near token expiry, so the
+session eventually stops refreshing if Windows blocks the executable later.
+
 ## An API key is missing or invalid
 
 ```sh

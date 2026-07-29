@@ -7,6 +7,7 @@ const ACTION_LABELS = Object.freeze({
   "add-key": "needs API key",
   login: "needs CLI sign-in",
   install: "needs CLI install",
+  blocked: "CLI blocked by Windows",
 });
 
 const COLOR_CODES = Object.freeze({
@@ -38,7 +39,11 @@ export function renderProviderChoices(snapshots, selected, colorEnabled = false)
       const label = providerStatusLabel(snapshot);
       const colored = colorize(
         label,
-        snapshot.action === "ready" ? "green" : "yellow",
+        snapshot.action === "ready"
+          ? "green"
+          : snapshot.action === "blocked"
+            ? "red"
+            : "yellow",
         colorEnabled,
       );
       return `  ${mark} ${position}. ${snapshot.displayName} — ${colored}`;

@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import { readFileSync } from "node:fs";
 
+import {
+  grokCliFailureMessage,
+  grokCliPath,
+  grokCliPreflight,
+} from "./grok-cli.mjs";
 import { grokAuthPath, grokSessionEntry } from "./grok-oauth-status.mjs";
 
 const REFRESH_THRESHOLD_MS = 5 * 60 * 1_000;
@@ -49,16 +52,18 @@ function isHardExpired(session, now) {
   return Number.isFinite(session.expiresAt) && session.expiresAt <= now;
 }
 
-function grokExecutable() {
-  if (process.env.GROK_CLI) return process.env.GROK_CLI;
-  const managed = path.join(process.env.GROK_HOME || path.join(os.homedir(), ".grok"), "bin", "grok");
-  return existsSync(managed) ? managed : "grok";
-}
-
-function refreshWithOfficialCli() {
+export function refreshWithOfficialCli({
+  executable = grokCliPath() || "grok",
+  preflightOptions,
+  spawnImpl = spawn,
+} = {}) {
+  const preflight = grokCliPreflight({ executable, ...preflightOptions });
+  if (!preflight.runnable) {
+    return Promise.reject(oauthError(grokCliFailureMessage(preflight)));
+  }
   return new Promise((resolve, reject) => {
     const { XAI_API_KEY: _apiKey, ...environment } = process.env;
-    const child = spawn(grokExecutable(), ["models"], {
+    const child = spawnImpl(executable, ["models"], {
       env: environment,
       stdio: ["ignore", "ignore", "ignore"],
     });
