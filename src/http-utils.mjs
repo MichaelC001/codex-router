@@ -99,6 +99,17 @@ function finishResponse(response) {
 // unknown event and lands on the plain graceful end, which is still strictly
 // better than a reset. The frame carries a fixed router-side message and never
 // upstream error text, so no response body can leak through it.
+//
+// The frame is prefixed with a blank line because the stream is being ended at
+// the point upstream died, which is very often mid-line: transforms forward
+// upstream's chunk boundaries verbatim, and a single `output_text.delta` can
+// carry a long span. Writing `event: error` straight onto an unterminated
+// `data:` line does not produce an error event at all -- a conforming parser
+// reads the field name as more of the previous event's data, so the failure
+// signal turns into garbage appended to the last delta, which is exactly the
+// silent corruption this function exists to avoid. Leading newlines are inert
+// when the stream did end cleanly: a blank line with no buffered fields
+// dispatches nothing.
 export function endStreamedResponse(response) {
   if (!response || response.writableEnded || response.destroyed) return;
   if (isEventStream(response)) {
@@ -109,7 +120,7 @@ export function endStreamedResponse(response) {
         message: "The local router lost the upstream response stream.",
         param: null,
       };
-      response.write(`event: error\ndata: ${JSON.stringify(data)}\n\n`);
+      response.write(`\n\nevent: error\ndata: ${JSON.stringify(data)}\n\n`);
     } catch {
       // The socket may already be gone; ending below is still correct.
     }

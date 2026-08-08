@@ -189,6 +189,71 @@ test("an upstream body that fails mid-stream ends the chunked body instead of re
   assert.equal(transform.destroyed, true, "the failure did not destroy the chain");
 });
 
+// The case above fails between two complete events, which is the lucky one. A
+// real reset lands wherever it lands, and transforms forward upstream's chunk
+// boundaries verbatim, so the client is often left holding an unterminated
+// `data:` line. Writing the terminal frame straight onto it produces no error
+// event at all: a conforming parser reads `event: error` as more of the
+// previous event's data, so the one signal saying the router lost the stream
+// becomes garbage glued to the last delta.
+test("a mid-line upstream failure still yields a parseable terminal error event", async () => {
+  const partial = 'data: {"type":"response.output_text.delta","delta":"unterminated';
+  const upstream = {
+    status: 200,
+    headers: new Map([["content-type", "text/event-stream"]]),
+    body: new ReadableStream({
+      start(controller) {
+        // No trailing newline: the stream dies mid-field.
+        controller.enqueue(new TextEncoder().encode(partial));
+        setTimeout(() => controller.error(new Error("reset mid-line")), 10);
+      },
+    }),
+  };
+
+  const server = http.createServer(async (request, response) => {
+    try {
+      await pipeResponse(upstream, response, new Set(), []);
+    } catch {
+      endStreamedResponse(response);
+    }
+  });
+
+  const port = await listen(server);
+  const result = await readRaw(port);
+  await close(server);
+
+  assert.equal(result.complete, true, "the chunked body never reached its terminator");
+
+  // The field name must begin a line of its own. Without the blank-line prefix
+  // this assertion fails: the body reads "...unterminatedevent: error".
+  assert.match(
+    result.body,
+    /\nevent: error\n/,
+    "the terminal frame was glued onto the unterminated data line",
+  );
+
+  // And the frame must survive an actual SSE parse rather than merely appearing
+  // in the bytes: split on the blank-line dispatch boundary and require an
+  // event whose own `event:` field is `error` and whose data parses.
+  const events = result.body.split(/\r?\n\r?\n/).filter((block) => block.trim());
+  const errorEvent = events.find((block) => /^event: error$/m.test(block));
+  assert.ok(errorEvent, "no dispatched event declared itself an error");
+  const dataLine = errorEvent.split(/\r?\n/).find((line) => line.startsWith("data: "));
+  assert.equal(
+    JSON.parse(dataLine.slice(6)).code,
+    "local_router_stream_failed",
+    "the terminal frame did not carry the router's failure code",
+  );
+
+  // The truncated delta is unavoidable -- upstream died there -- but it must
+  // not have absorbed the router's frame.
+  assert.equal(
+    /unterminatedevent/.test(result.body),
+    false,
+    "router protocol text leaked into the model's output span",
+  );
+});
+
 // Only SSE gets a terminal event. Injecting one into a JSON body would corrupt
 // it; a truncated JSON body already fails the client's parser, and a clean end
 // still beats a reset because the failure is a parse error rather than an
