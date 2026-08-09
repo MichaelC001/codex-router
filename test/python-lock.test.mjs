@@ -210,6 +210,40 @@ test("an unhashed requirement in the lock is reported", () => {
   }
 });
 
+// The CI verifier starts the gateway itself, so it has to hand it the same
+// environment src/start.mjs does. The encoding pair is the load-bearing part:
+// LiteLLM prints Unicode banners at startup, and on a non-UTF-8 Windows code
+// page that raises UnicodeEncodeError before the app finishes coming up. The
+// verifier originally omitted it and both Windows legs failed against a lock
+// that had installed perfectly -- the check was not starting the proxy the way
+// the router does, which is the only thing it claims to test. Two copies of a
+// constant is exactly the shape that has drifted in this repo before, so the
+// agreement is asserted rather than left to the comment in each file.
+test("the CI gateway verifier starts LiteLLM with the environment start.mjs uses", () => {
+  const starter = readFileSync(repoFile("src/start.mjs"), "utf8");
+  const verifier = readFileSync(
+    repoFile("scripts/verify-python-lock.py"),
+    "utf8",
+  );
+
+  for (const [name, value] of [
+    ["PYTHONIOENCODING", "utf-8"],
+    ["PYTHONUTF8", "1"],
+    ["LITELLM_LOG", "ERROR"],
+    ["LITELLM_TELEMETRY", "False"],
+    ["NO_COLOR", "1"],
+  ]) {
+    assert.ok(
+      new RegExp(`${name}:\\s*"${value}"`).test(starter),
+      `src/start.mjs no longer sets ${name}="${value}"; update the verifier to match`,
+    );
+    assert.ok(
+      new RegExp(`"${name}":\\s*"${value}"`).test(verifier),
+      `scripts/verify-python-lock.py does not pass ${name}="${value}" to the gateway`,
+    );
+  }
+});
+
 function repoFileIn(root, relative) {
   return path.join(root, ...relative.split("/"));
 }

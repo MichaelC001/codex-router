@@ -157,11 +157,28 @@ def check_proxy_starts(venv: Path, timeout: float) -> bool:
         )
         log = Path(workspace) / "litellm.log"
         exited = None
+        # The same environment src/start.mjs gives the gateway. The encoding
+        # pair is not incidental: LiteLLM prints Unicode banners at startup, and
+        # on a non-UTF-8 Windows code page (cp1252 on the runners) that raises
+        # UnicodeEncodeError before the app finishes coming up, so the proxy
+        # never serves. Omitting it here made this check fail on Windows against
+        # a lock that had installed perfectly -- the script was not starting the
+        # proxy the way the router does, which is the only thing it claims to
+        # test. See the same constants in src/start.mjs.
+        environment = {
+            **os.environ,
+            "LITELLM_LOG": "ERROR",
+            "LITELLM_TELEMETRY": "False",
+            "NO_COLOR": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+        }
         with log.open("wb") as sink:
             child = subprocess.Popen(
                 [str(binary), "--config", str(config), "--host", "127.0.0.1", "--port", str(port)],
                 stdout=sink,
                 stderr=subprocess.STDOUT,
+                env=environment,
             )
             try:
                 deadline = time.monotonic() + timeout
