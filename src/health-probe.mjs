@@ -58,44 +58,27 @@ export async function waitForHealth({
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
   let lastFailure = "the service never answered";
-  let wakeSleeper = null;
-
-  const onChildExit = () => {
-    // Only the sleep is cut short. Aborting the in-flight probe from here as
-    // well is the obvious next step and it crashes Node on Windows: tearing
-    // down a live fetch from inside the exit callback, while startup is already
-    // unwinding, trips a libuv assertion (`!(handle->flags & UV_HANDLE_CLOSING)`
-    // in win/async.c) and the process dies with 0xC0000409 instead of reporting
-    // the failure it had already diagnosed. The probe is bounded by its own
-    // timer anyway, so the loop reports the exit one window later at worst --
-    // which is still sooner than before, because the sleep no longer follows.
-    wakeSleeper?.();
-  };
-  if (child) child.once("exit", onChildExit);
 
   const assertStillStarting = () => {
     if (hasExited(child)) throw new Error(`${label} exited before becoming healthy.`);
     if (isShuttingDown()) throw new Error("Service startup was interrupted.");
   };
 
+  // Deliberately no "exit" listener on the child. Waking the backoff sleep the
+  // moment a service dies is a genuine improvement and it is not worth what it
+  // costs here: on Windows, reaching into this loop from the child's exit
+  // callback while startup is already unwinding kills the process with
+  // 0xC0000409 on a libuv assertion (!(handle->flags & UV_HANDLE_CLOSING),
+  // win/async.c:94) -- in the middle of reporting the failure it had already
+  // diagnosed correctly. Two narrower attempts at keeping it did not help, so
+  // the exit is detected where it always was, by assertStillStarting() between
+  // the probe and the sleep. A dead child costs at most one backoff interval,
+  // exactly as it did before, and the widened probe window plus the
+  // abort-versus-refusal split -- the actual point of this change -- are intact.
   const sleep = (ms) =>
-    new Promise((resolve) => {
-      if (ms <= 0) {
-        resolve();
-        return;
-      }
-      const timer = setTimeout(() => {
-        wakeSleeper = null;
-        resolve();
-      }, ms);
-      wakeSleeper = () => {
-        clearTimeout(timer);
-        wakeSleeper = null;
-        resolve();
-      };
-    });
+    ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 
-  try {
+  {
     while (Date.now() < deadline) {
       assertStillStarting();
 
@@ -140,7 +123,5 @@ export async function waitForHealth({
       await sleep(wait);
     }
     throw new Error(`Timed out waiting for ${label} to become healthy (${lastFailure}).`);
-  } finally {
-    if (child) child.off("exit", onChildExit);
   }
 }

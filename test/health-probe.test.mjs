@@ -185,12 +185,16 @@ test("a child that dies while a probe is in flight is reported within one window
   assert.ok(lag < 1_200, `crash should surface within one probe window, took ${lag} ms`);
 });
 
-test("a child that dies during the backoff sleep is reported at once", async () => {
+// Waking the sleep on the child's "exit" event would report this faster, and it
+// is not worth what it costs: reaching into the loop from that callback crashes
+// Node on Windows during startup teardown (0xC0000409, libuv win/async.c:94).
+// So a dead child costs at most one backoff interval, exactly as it did before
+// this module existed. The bound is asserted rather than left implicit, so
+// nobody re-adds the listener believing the delay is an oversight.
+test("a child that dies during the backoff sleep is reported within one interval", async () => {
   const child = new FakeChild();
   const fetchImpl = refusesInstantly();
   const killAt = { value: 0 };
-  // By 3 s the backoff has grown past a second, so the pre-fix loop would sit
-  // out the rest of the sleep before noticing the crash.
   setTimeout(() => {
     killAt.value = Date.now();
     child.exit(1);
@@ -206,8 +210,10 @@ test("a child that dies during the backoff sleep is reported at once", async () 
     }),
     /LiteLLM gateway exited before becoming healthy/,
   );
+  // The backoff caps at 2 s, so the wait after the kill cannot exceed that plus
+  // the instant refusal that follows it.
   const lag = Date.now() - killAt.value;
-  assert.ok(lag < 400, `crash should surface immediately, took ${lag} ms`);
+  assert.ok(lag < 2_500, `crash should surface within one backoff, took ${lag} ms`);
 });
 
 test("a child that already exited is reported without probing at all", async () => {
