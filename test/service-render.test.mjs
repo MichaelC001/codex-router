@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -15,6 +16,18 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function serviceEnv(platform, testRoot, target = "codex") {
+  return {
+    ...process.env,
+    CODEX_HOME: path.join(testRoot, "codex home"),
+    CODEX_ROUTER_STATE_DIR: path.join(testRoot, "router state"),
+    MODEL_ROUTER_STATE_DIR: path.join(testRoot, `${target} router state`),
+    MODEL_ROUTER_TARGET: target,
+    CODEX_ROUTER_SERVICE_PLATFORM: platform,
+    XDG_CONFIG_HOME: path.join(testRoot, "xdg config"),
+  };
+}
 
 function serviceCommand(
   script,
@@ -31,15 +44,7 @@ function serviceCommand(
     {
       cwd: sourceRoot,
       encoding: "utf8",
-      env: {
-        ...process.env,
-        CODEX_HOME: path.join(testRoot, "codex home"),
-        CODEX_ROUTER_STATE_DIR: path.join(testRoot, "router state"),
-        MODEL_ROUTER_STATE_DIR: path.join(testRoot, `${target} router state`),
-        MODEL_ROUTER_TARGET: target,
-        CODEX_ROUTER_SERVICE_PLATFORM: platform,
-        XDG_CONFIG_HOME: path.join(testRoot, "xdg config"),
-      },
+      env: serviceEnv(platform, testRoot, target),
     },
   );
 }
@@ -295,6 +300,223 @@ test(
 
       // Uninstalling again must not fail on the already-removed launchers.
       assert.equal(run("uninstall").installed, false);
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+// Off Windows there is no schtasks.exe or powershell.exe, so every scheduler
+// call src/service-windows.mjs makes is a failure and the ordering between them
+// is invisible. Executable stubs of those names, first on PATH, make the whole
+// sequence observable and let one call be failed on demand -- which is the only
+// way to reach the recovery path without a Windows box and a restricted shell.
+// They can never shadow the real executables, because the tests that use them
+// are skipped on win32.
+function schedulerStubs(directory, options = {}) {
+  const { schtasksFail = "", powershellFail = "", runningQueries = 0 } = options;
+  mkdirSync(directory, { recursive: true });
+  const logPath = path.join(directory, "calls.log");
+  const counterPath = path.join(directory, "state-queries");
+  const preamble = (fail) =>
+    [
+      "#!/bin/sh",
+      `printf '%s\\n' "$*" >> "${logPath}"`,
+      `for pattern in ${fail}; do`,
+      '  case "$*" in *"$pattern"*) exit 1 ;; esac',
+      "done",
+    ].join("\n");
+
+  writeFileSync(path.join(directory, "schtasks.exe"), `${preamble(schtasksFail)}\nexit 0\n`);
+  // taskState() reads the task state off this process's stdout. The counter is
+  // what lets a test say "report Running for the first N queries", so the stop
+  // wait can be observed polling and then finishing.
+  writeFileSync(
+    path.join(directory, "powershell.exe"),
+    [
+      preamble(powershellFail),
+      'case "$*" in',
+      "  *Get-ScheduledTask*)",
+      "    count=0",
+      `    if [ -f "${counterPath}" ]; then count=$(cat "${counterPath}"); fi`,
+      "    count=$((count + 1))",
+      `    printf '%s' "$count" > "${counterPath}"`,
+      `    if [ "$count" -le ${runningQueries} ]; then printf 'Running'; else printf 'Ready'; fi`,
+      "    ;;",
+      "esac",
+      "exit 0",
+      "",
+    ].join("\n"),
+  );
+
+  for (const name of ["schtasks.exe", "powershell.exe"]) {
+    chmodSync(path.join(directory, name), 0o755);
+  }
+  return {
+    path: `${directory}${path.delimiter}${process.env.PATH}`,
+    calls: () =>
+      existsSync(logPath)
+        ? readFileSync(logPath, "utf8").split("\n").filter(Boolean)
+        : [],
+  };
+}
+
+function runWindowsService(testRoot, command, extraEnv = {}) {
+  return spawnSync(
+    process.execPath,
+    [path.join(root, "src", "service-windows.mjs"), command],
+    {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 120_000,
+      env: { ...serviceEnv("win32", testRoot), ...extraEnv },
+    },
+  );
+}
+
+test(
+  "a blocked registration restarts whichever task definition survived",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-recover-"));
+    try {
+      // Registration is blocked through both routes, the way a restricted or
+      // non-elevated terminal blocks it. endTask() has already stopped the
+      // running router by then, so returning here would trade a working install
+      // for nothing at all -- the regression this guards.
+      const stubs = schedulerStubs(path.join(testRoot, "survivor"), {
+        schtasksFail: "/Create",
+        powershellFail: "Register-ScheduledTask",
+      });
+      const result = runWindowsService(testRoot, "install", { PATH: stubs.path });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).installed, true);
+
+      const calls = stubs.calls();
+      const at = (needle) => calls.findIndex((line) => line.includes(needle));
+      assert.ok(at("/End") >= 0, `no /End in:\n${calls.join("\n")}`);
+      assert.ok(
+        at("/End") < at("Register-ScheduledTask"),
+        `the running instance must be ended before re-registering:\n${calls.join("\n")}`,
+      );
+      // The surviving definition is queried before it is started: /Run against
+      // a name that failed to register recovers nothing and reports its own
+      // error over the one that actually matters.
+      assert.ok(
+        at("/Create") < at("/Query") && at("/Query") < at("/Run"),
+        `the recovery must query before it runs:\n${calls.join("\n")}`,
+      );
+      assert.equal(calls.filter((line) => line.includes("/Run")).length, 1);
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "a registration failure that leaves no task does not start one",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-no-task-"));
+    try {
+      const stubs = schedulerStubs(path.join(testRoot, "gone"), {
+        schtasksFail: "/Create /Query",
+        powershellFail: "Register-ScheduledTask",
+      });
+      const result = runWindowsService(testRoot, "install", { PATH: stubs.path });
+      // Still best effort: the launchers are written and the caller retries.
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).installed, true);
+
+      const calls = stubs.calls();
+      assert.ok(calls.some((line) => line.includes("/Query")));
+      assert.equal(
+        calls.some((line) => line.includes("/Run")),
+        false,
+        `nothing survived to start, so /Run must not be issued:\n${calls.join("\n")}`,
+      );
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "install waits for the ended instance before starting the new one",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-stop-wait-"));
+    try {
+      // schtasks /End returns before the instance is gone. Reporting Running
+      // for the first two state queries reproduces that window; a /Run issued
+      // inside it is dropped by MultipleInstances IgnoreNew.
+      const stubs = schedulerStubs(path.join(testRoot, "winding-down"), {
+        runningQueries: 2,
+      });
+      const result = runWindowsService(testRoot, "install", { PATH: stubs.path });
+      assert.equal(result.status, 0, result.stderr);
+
+      const calls = stubs.calls();
+      const states = calls.filter((line) => line.includes("Get-ScheduledTask"));
+      assert.equal(
+        states.length,
+        3,
+        `the wait must poll until the state leaves Running:\n${calls.join("\n")}`,
+      );
+      const lastState = calls.findLastIndex((line) => line.includes("Get-ScheduledTask"));
+      assert.ok(
+        lastState < calls.findIndex((line) => line.includes("/Run")),
+        `the new instance must start after the old one has gone:\n${calls.join("\n")}`,
+      );
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "an instance that never stops cannot hang the install",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-stuck-"));
+    try {
+      // The state never leaves Running, so only the deadline can end the wait.
+      // Without it install would block forever and take the installer with it.
+      const stubs = schedulerStubs(path.join(testRoot, "stuck"), {
+        runningQueries: 1_000_000,
+      });
+      const result = runWindowsService(testRoot, "install", { PATH: stubs.path });
+      assert.equal(result.status, 0, result.stderr);
+
+      const calls = stubs.calls();
+      const states = calls.filter((line) => line.includes("Get-ScheduledTask"));
+      assert.ok(states.length > 1, "the wait must have polled more than once");
+      assert.ok(
+        states.length < 500,
+        `the wait must be bounded, not merely slow: ${states.length} state queries`,
+      );
+      // Giving up is not giving in: the install still registers and starts the
+      // task, and the readiness check downstream is what reports a router that
+      // never came back.
+      assert.ok(calls.some((line) => line.includes("/Run")));
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "stopping a service that was never installed is not an error",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-stop-"));
+    try {
+      // No stubs on PATH, so schtasks.exe is missing exactly as it is when the
+      // task does not exist. stop used to throw that straight at the caller
+      // while uninstall and restart tolerated it.
+      const result = runWindowsService(testRoot, "stop");
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), { state: "stopped" });
     } finally {
       rmSync(testRoot, { recursive: true, force: true });
     }

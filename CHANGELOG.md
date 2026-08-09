@@ -9,7 +9,10 @@
   which starts the wrapper hidden and waits for it, re-raising the wrapper's
   exit code so Task Scheduler's restart-on-failure settings still see a crash as
   a crash. Reinstalling replaces the old task in place, and uninstalling removes
-  both generated launchers.
+  both generated launchers. Reinstalling and restarting now wait for the running
+  instance to actually exit before starting the new one, an install that cannot
+  register the task starts the router again rather than leaving the machine with
+  none, and stopping a service that was never installed is no longer an error.
 
 - **Text-only models can answer about a pasted image.** A model with no image
   input — DeepSeek, GLM, Kimi — used to refuse the paste outright. When the

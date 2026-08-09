@@ -182,11 +182,56 @@ function installTask() {
   }
 }
 
+// `schtasks /End` returns once Task Scheduler has accepted the request, not
+// once the instance is gone, and `MultipleInstances IgnoreNew` silently drops a
+// `/Run` issued while the old one is still winding down -- which leaves the
+// router stopped until the next logon, and turns the installer's readiness wait
+// into a five-minute stall followed by a rollback. Polling the real state beats
+// retrying `/Run`: it continues as soon as the instance has actually gone
+// instead of guessing how long that takes, and it gives up on a fixed deadline
+// instead of hoping one extra attempt is enough.
+const TASK_STOP_TIMEOUT_MS = 10_000;
+const TASK_STOP_POLL_MS = 250;
+// Every state query has to return for the deadline above to mean anything, so a
+// wedged PowerShell is capped rather than allowed to hang the install outright.
+const TASK_STATE_TIMEOUT_MS = 15_000;
+
+function sleep(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function waitForTaskToStop() {
+  const deadline = Date.now() + TASK_STOP_TIMEOUT_MS;
+  // An undefined state means no PowerShell could answer -- the same restricted
+  // shell that blocks registration -- so there is nothing to poll and waiting
+  // would only spend the deadline on a question that cannot be answered.
+  while (taskState() === "running") {
+    if (Date.now() >= deadline) return;
+    sleep(TASK_STOP_POLL_MS);
+  }
+}
+
 function endTask() {
   try {
     schtasks(["/End", "/TN", taskName], { quiet: true });
   } catch {
-    // The task may not exist, or may not be running.
+    // The task may not exist, or may not be running; either way there is no
+    // instance left to wait for.
+    return;
+  }
+  waitForTaskToStop();
+}
+
+// Only a task that still exists can be started. `Register-ScheduledTask -Force`
+// unregisters before it registers, so a failed registration leaves either the
+// previous definition or nothing at all, and `/Run` against a name that is gone
+// recovers nothing while reporting an error of its own.
+function taskExists() {
+  try {
+    schtasks(["/Query", "/TN", taskName], { quiet: true });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -202,6 +247,7 @@ function taskState() {
           encoding: "utf8",
           env: { ...process.env, CODEX_ROUTER_TASK: taskName },
           stdio: ["ignore", "pipe", "ignore"],
+          timeout: TASK_STATE_TIMEOUT_MS,
         },
       ).trim().toLowerCase();
     } catch {
@@ -237,8 +283,11 @@ if (command === "render") {
 } else if (command === "render-task") {
   process.stdout.write(`${JSON.stringify(taskAction())}\n`);
 } else if (command === "install") {
-  writeLaunchers();
   try {
+    // Writing the launchers belongs inside the try: renameSync over the .vbs
+    // raises a sharing violation while a running wscript.exe still holds it
+    // open, and that used to throw out of install with nothing to catch it.
+    writeLaunchers();
     // An upgrade from the console-visible task may still have that instance
     // running. Register-ScheduledTask -Force replaces the definition under the
     // same task name, so no duplicate is left behind, but it does not stop the
@@ -248,8 +297,19 @@ if (command === "render") {
     installTask();
     schtasks(["/Run", "/TN", taskName], { quiet: true });
   } catch {
-    // Scheduled-task creation can be restricted in a non-elevated terminal; the
-    // launchers are still written, so report success and let the caller retry.
+    // Scheduled-task creation can be restricted in a non-elevated terminal. The
+    // launchers are still written, so the install is reported as success and
+    // the caller can retry -- but endTask() has already stopped whatever was
+    // running by this point, so simply returning would take a working router
+    // down in exchange for nothing. Start whichever definition survived the
+    // failed registration. When none did there is nothing to restore: no
+    // snapshot was taken, and re-creating the old console-visible action would
+    // reintroduce the very defect this launcher exists to fix.
+    try {
+      if (taskExists()) schtasks(["/Run", "/TN", taskName], { quiet: true });
+    } catch {
+      // Nothing left to start; the caller's readiness check reports the failure.
+    }
   }
   process.stdout.write(`${JSON.stringify({ installed: true, path: wrapperPath })}\n`);
 } else if (command === "uninstall") {
@@ -281,7 +341,9 @@ if (command === "render") {
     `${JSON.stringify({ installed, loaded: state === "running", state })}\n`,
   );
 } else if (command === "stop") {
-  schtasks(["/End", "/TN", taskName], { quiet: true });
+  // Stopping is idempotent, like uninstall and restart: a task that is missing
+  // or already idle is the state the caller asked for, not an error to raise.
+  endTask();
   process.stdout.write(`${JSON.stringify({ state: "stopped" })}\n`);
 } else {
   if (command === "restart") endTask();
