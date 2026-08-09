@@ -30,10 +30,10 @@ import { probeDelayMs, probeTimeoutMs } from "./health-backoff.mjs";
 // run past the deadline by up to its own window, so a service that accepts
 // connections and never answers is reported up to MAX_PROBE_TIMEOUT_MS late.
 // That is the right trade -- the alternative is spending the tail of the budget
-// on narrow probes that cannot conclude anything -- and it does not apply to a
-// service that died, which is reported the instant the child exits.
+// on narrow probes that cannot conclude anything -- and a service that died is
+// still reported sooner than it used to be, because the backoff sleep after the
+// probe is cut short the moment the child exits.
 const PROBE_TIMED_OUT = Symbol("probe timed out");
-const CHILD_EXITED = Symbol("child exited");
 
 function hasExited(child) {
   return Boolean(child) && (child.exitCode !== null || child.signalCode !== null);
@@ -43,9 +43,8 @@ function hasExited(child) {
  * Poll `url` until the service behind it is healthy.
  *
  * Rejects when the child exits, when startup is interrupted, or when the
- * budget runs out. A probe already in flight is aborted the moment the child
- * exits, so a crash is reported immediately rather than after the probe window
- * and the backoff sleep.
+ * budget runs out. A child exit cuts the backoff sleep short, so a crash is
+ * reported without waiting out a sleep the dead process cannot benefit from.
  */
 export async function waitForHealth({
   label,
@@ -60,13 +59,17 @@ export async function waitForHealth({
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
   let lastFailure = "the service never answered";
-  let activeProbe = null;
   let wakeSleeper = null;
 
   const onChildExit = () => {
-    // Do not sit out a probe window or a backoff sleep for a process that is
-    // already gone: cut both short and let the loop report the exit.
-    activeProbe?.abort(CHILD_EXITED);
+    // Only the sleep is cut short. Aborting the in-flight probe from here as
+    // well is the obvious next step and it crashes Node on Windows: tearing
+    // down a live fetch from inside the exit callback, while startup is already
+    // unwinding, trips a libuv assertion (`!(handle->flags & UV_HANDLE_CLOSING)`
+    // in win/async.c) and the process dies with 0xC0000409 instead of reporting
+    // the failure it had already diagnosed. The probe is bounded by its own
+    // timer anyway, so the loop reports the exit one window later at worst --
+    // which is still sooner than before, because the sleep no longer follows.
     wakeSleeper?.();
   };
   if (child) child.once("exit", onChildExit);
@@ -100,7 +103,6 @@ export async function waitForHealth({
       const windowMs = probeTimeoutMs(attempt);
       const controller = new AbortController();
       const probeTimer = setTimeout(() => controller.abort(PROBE_TIMED_OUT), windowMs);
-      activeProbe = controller;
       let timedOut = false;
       try {
         const response = await fetchImpl(url, { headers, signal: controller.signal });
@@ -119,7 +121,6 @@ export async function waitForHealth({
           : "the connection was refused";
       } finally {
         clearTimeout(probeTimer);
-        activeProbe = null;
       }
 
       const wait = timedOut

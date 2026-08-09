@@ -148,7 +148,14 @@ test("refused probes still back off rather than hammering the port", async () =>
   assert.ok(fetchImpl.calls <= 10, `expected a handful of probes, made ${fetchImpl.calls}`);
 });
 
-test("a child that dies while a probe is in flight is reported at once", async () => {
+// A child that dies mid-probe is reported when that probe's own window closes,
+// not the instant it exits. Aborting the in-flight fetch from the exit callback
+// would report it sooner and crashes Node on Windows -- a libuv assertion in
+// win/async.c, killing the process with 0xC0000409 while it was in the middle of
+// reporting the very failure it had diagnosed. So the probe is left to its timer
+// and only the sleep after it is skipped. The bound that matters is that the
+// report still beats the old behaviour, which sat out the window *and* the sleep.
+test("a child that dies while a probe is in flight is reported within one window", async () => {
   const child = new FakeChild();
   const fetchImpl = answersAfter(60_000);
   const killAt = { value: 0 };
@@ -167,8 +174,10 @@ test("a child that dies while a probe is in flight is reported at once", async (
     }),
     /LiteLLM gateway exited before becoming healthy/,
   );
+  // The first window is 1 s and the kill lands 300 ms into it, so the remaining
+  // wait is under a second and no backoff follows it.
   const lag = Date.now() - killAt.value;
-  assert.ok(lag < 400, `crash should surface immediately, took ${lag} ms`);
+  assert.ok(lag < 1_200, `crash should surface within one probe window, took ${lag} ms`);
 });
 
 test("a child that dies during the backoff sleep is reported at once", async () => {
