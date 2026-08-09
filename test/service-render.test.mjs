@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -127,6 +135,131 @@ test("the Windows scheduled task runs the VBS launcher through wscript.exe", () 
     rmSync(testRoot, { recursive: true, force: true });
   }
 });
+
+// The scheduled task's restart policy is the reason the exit code matters:
+// Task Scheduler only re-triggers RestartCount/RestartInterval when the action
+// reports a failure, so a launcher that swallowed the wrapper's exit code would
+// trade a console window for a router that stays dead after its first crash.
+// Nothing off Windows can execute a .vbs, so -- exactly like
+// `install.ps1 parses under powershell.exe` in test/installer-scripts.test.mjs --
+// this is the only place that link is executed rather than reasoned about.
+//
+// wscript.exe with //B //NoLogo is the host the scheduled task actually uses
+// (see taskAction in src/service-windows.mjs). cscript.exe is the console host
+// over the same script engine, and it runs without //B so that a broken
+// launcher reports the parse or runtime error on stderr instead of arriving as
+// an unexplained exit code.
+const WINDOWS_SCRIPT_HOSTS = [
+  { name: "cscript.exe", args: ["//NoLogo"] },
+  { name: "wscript.exe", args: ["//B", "//NoLogo"] },
+];
+
+// Resolved absolutely: these live in the system directory, and naming them
+// outright keeps the test independent of whatever PATH the runner supplies.
+function scriptHost(name) {
+  return path.join(process.env.SystemRoot || "C:\\Windows", "System32", name);
+}
+
+test(
+  "the generated Windows launcher returns the wrapper's exit code to its script host",
+  { skip: process.platform !== "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-vbs-exit-"));
+    try {
+      const stateDir = windowsStateDir(testRoot);
+      mkdirSync(stateDir, { recursive: true });
+      const wrapperPath = path.join(stateDir, "start-codex-router.cmd");
+      const launcherPath = path.join(stateDir, "start-codex-router-hidden.vbs");
+
+      // The shipped generator produces the source. Only the encoding is
+      // repeated here: `install` is the code path that writes the file, and
+      // running it would register a real scheduled task on this machine.
+      // `the Windows installer writes both launchers idempotently` asserts that
+      // the shipped writer emits exactly these bytes.
+      const source = serviceCommand(
+        "service-windows.mjs",
+        "win32",
+        testRoot,
+        "render-launcher",
+      );
+      const encoded = Buffer.concat([
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from(source, "utf16le"),
+      ]);
+      writeFileSync(launcherPath, encoded);
+
+      const report = (host, result, expectation, note) =>
+        [
+          `host: ${host.name} ${host.args.join(" ")} "${launcherPath}"`,
+          `expected exit code: ${expectation}`,
+          `actual exit code: ${result.status}`,
+          `terminating signal: ${result.signal ?? "none"}`,
+          `spawn error: ${result.error ? result.error.message : "none"}`,
+          `stdout: ${(result.stdout || "").trim() || "(empty)"}`,
+          `stderr: ${(result.stderr || "").trim() || "(empty)"}`,
+          note,
+          "generated launcher source:",
+          source,
+        ].join("\n");
+
+      const runLauncher = (host) => {
+        const result = spawnSync(scriptHost(host.name), [...host.args, launcherPath], {
+          encoding: "utf8",
+          timeout: 60_000,
+          windowsHide: true,
+        });
+        // A spawn failure or a timeout leaves status null, which would satisfy
+        // the "not zero" assertion below without the launcher having run at all.
+        assert.equal(
+          typeof result.status,
+          "number",
+          report(host, result, "any number", "the script host did not run to completion"),
+        );
+        return result;
+      };
+
+      for (const host of WINDOWS_SCRIPT_HOSTS) {
+        // A crashed router has to reach Task Scheduler as a failed run. 42 is
+        // arbitrary and distinctive: it is neither the 1 a WSH script error
+        // produces nor the 0 a silent success would.
+        writeFileSync(wrapperPath, "@echo off\r\nexit /b 42\r\n");
+        let result = runLauncher(host);
+        assert.equal(
+          result.status,
+          42,
+          report(host, result, 42, "the wrapper's exit code must reach the host unchanged"),
+        );
+
+        // ...and the reverse: a clean stop must not be reported as a failure,
+        // or the task restarts a router that was deliberately shut down.
+        writeFileSync(wrapperPath, "@echo off\r\nexit /b 0\r\n");
+        result = runLauncher(host);
+        assert.equal(
+          result.status,
+          0,
+          report(host, result, 0, "a clean wrapper exit must not be reported as a failure"),
+        );
+
+        // A wrapper that cannot start at all must still fail. `On Error Resume
+        // Next` without the Err.Number guard leaves `status` unset, and
+        // `WScript.Quit` on an unset value exits 0 -- which is the shape that
+        // silently disables the restart policy. cmd.exe itself reports this
+        // particular failure; the Err.Number branch covers a cmd.exe that will
+        // not start, which no ordinary host can reproduce because CreateProcess
+        // resolves it from the system directory whatever PATH says.
+        rmSync(wrapperPath);
+        result = runLauncher(host);
+        assert.notEqual(
+          result.status,
+          0,
+          report(host, result, "anything but 0", "a wrapper that never ran must not report success"),
+        );
+      }
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "the Windows installer writes both launchers idempotently and uninstall removes both",
