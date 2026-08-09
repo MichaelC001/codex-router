@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -45,6 +46,57 @@ function withoutComments(source) {
 // PowerShell forwards an argument array either as a value ($Arguments) or by
 // splatting it into a named-parameter call (@Arguments); both count.
 const FORWARDS_ARGUMENTS = /[@$]Arguments\b/;
+
+function readScript(...parts) {
+  return readFileSync(path.join(root, ...parts), "utf8");
+}
+
+// The refusal that blocks an update on a dirty checkout is written three times
+// -- once in Node for the installed updater, once in PowerShell and once in
+// POSIX shell for the two bootstrap installers, neither of which can import
+// from src/. Three copies is how the first fix ended up incomplete, so every
+// property that matters is asserted against all three here.
+const BOOTSTRAP_INSTALLERS = [
+  {
+    name: "install.sh",
+    source: readScript("install.sh"),
+    previewLimit: /^dirty_preview_limit=(\d+)$/m,
+    forceGuard: /if \[ "\$force" != true \]; then/,
+    reset: /git -C "\$install_dir" reset --hard HEAD/,
+  },
+  {
+    name: "install.ps1",
+    source: readScript("install.ps1"),
+    previewLimit: /^\$DirtyPreviewLimit = (\d+)$/m,
+    forceGuard: /if \(-not \$Force\) \{ throw \(Get-LocalModificationMessage/,
+    reset: /git -C \$Directory reset --hard HEAD/,
+  },
+];
+
+// Unlike PowerShell, POSIX shell runs everywhere the suite does -- `sh -n` is
+// already relied on above -- so install.sh gets executed rather than pattern
+// matched. Lifting the helpers straight out of the shipped file keeps the test
+// honest: it runs the code that ships, not a copy of it.
+function posixDirtyHelpers() {
+  const source = readScript("install.sh");
+  const start = source.indexOf("dirty_preview_limit=");
+  const messageStart = source.indexOf("local_modifications_message() {");
+  assert.notEqual(start, -1, "install.sh must declare dirty_preview_limit");
+  assert.ok(messageStart > start, "install.sh must define local_modifications_message");
+  const end = source.indexOf("\n}\n", messageStart);
+  assert.notEqual(end, -1, "local_modifications_message must be a complete function");
+  return source.slice(start, end + 3);
+}
+
+function runPosixHelper(call, args, options = {}) {
+  const result = spawnSync("sh", ["-s", ...args], {
+    input: `${posixDirtyHelpers()}\n${call}\n`,
+    encoding: "utf8",
+    ...options,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
 
 test("install.sh is valid POSIX shell", () => {
   const result = spawnSync("sh", ["-n", path.join(root, "install.sh")], {
@@ -140,26 +192,91 @@ test("rollback --force reaches the updater on Windows", () => {
   assert.match(branches.get("rollback"), /@\("rollback"\)\s*\+\s*\$Arguments/);
 });
 
-test("the bootstrap installer refuses on tracked edits only", () => {
-  // install.ps1 run without -CheckoutInstall is the irm|iex self-update path.
-  // It reimplements requireReplaceableCheckout() because it may be running as a
-  // piped script with no checkout to import from -- so it has to agree with it.
-  const windows = readFileSync(path.join(root, "install.ps1"), "utf8");
-  assert.match(windows, /status --porcelain --untracked-files=no/);
-  assert.equal(
-    /status --porcelain(?! --untracked-files=no)/.test(windows),
-    false,
-    "an untracked-file-counting status check is back in install.ps1",
-  );
+test("both bootstrap installers refuse on tracked edits only", () => {
+  // Run without -CheckoutInstall / from a pipe, these are the curl|sh and
+  // irm|iex self-update paths. They reimplement requireReplaceableCheckout()
+  // because a piped script has no checkout to import from -- so they have to
+  // agree with it. Counting untracked files is what stranded people on an old
+  // version with no way to work out why.
+  for (const { name, source } of BOOTSTRAP_INSTALLERS) {
+    assert.match(source, /status --porcelain --untracked-files=no/, name);
+    assert.equal(
+      /status --porcelain(?! --untracked-files=no)/.test(source),
+      false,
+      `an untracked-file-counting status check is back in ${name}`,
+    );
+  }
 });
 
-test("the bootstrap installer's refusal says what src/update.mjs says", () => {
-  const windows = readFileSync(path.join(root, "install.ps1"), "utf8");
-  const reference = localModificationsMessage([" M src/router.mjs"], "/tmp/checkout");
+test("every copy of the refusal previews at the same limit", () => {
+  for (const { name, source, previewLimit } of BOOTSTRAP_INSTALLERS) {
+    const declared = source.match(previewLimit);
+    assert.ok(declared, `${name} must declare its own preview limit`);
+    assert.equal(Number(declared[1]), DIRTY_PREVIEW_LIMIT, name);
+  }
+});
 
-  // Sentence for sentence against the Node original, so a reword on one side
-  // has to be made on both. The divergence is the bug: install.ps1 kept the
-  // pre-fix "has local changes" wording, which names no file and no way out.
+test("the POSIX installer's refusal is byte-identical to src/update.mjs", () => {
+  // Not a pattern match: install.sh's own helper is executed and its output
+  // compared with the Node original. A reword on either side fails here, which
+  // is the coupling that was missing when the first fix landed in one file.
+  for (const changes of [
+    ["M src/router.mjs"],
+    ["M src/router.mjs", "M bin/install"],
+    Array.from({ length: 14 }, (_, index) => `M src/file-${index}.mjs`),
+  ]) {
+    const posix = runPosixHelper('local_modifications_message "$1" "$2"', [
+      changes.join("\n"),
+      "/tmp/checkout",
+    ]);
+    assert.equal(posix, `${localModificationsMessage(changes, "/tmp/checkout")}\n`);
+  }
+});
+
+test("the POSIX installer counts tracked edits and ignores untracked files", () => {
+  // The behaviour change every curl|sh user gets: a checkout carrying nothing
+  // but an untracked file now updates instead of refusing forever.
+  const checkout = mkdtempSync(path.join(os.tmpdir(), "posix-dirty-"));
+  const git = (...args) =>
+    execFileSync("git", ["-C", checkout, ...args], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.com",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.com",
+      },
+    });
+  try {
+    git("init", "--quiet");
+    writeFileSync(path.join(checkout, "tracked.txt"), "original\n");
+    git("add", "tracked.txt");
+    git("commit", "--quiet", "-m", "seed");
+
+    const modifications = () => runPosixHelper('local_modifications "$1"', [checkout]);
+    assert.equal(modifications(), "");
+
+    writeFileSync(path.join(checkout, "stray.txt"), "not git's business\n");
+    assert.equal(modifications(), "", "an untracked file must not block the update");
+
+    writeFileSync(path.join(checkout, "tracked.txt"), "edited\n");
+    assert.equal(modifications(), "M tracked.txt\n");
+    // ...and only the tracked one, so the message never names a file the user
+    // is about to be told to stash.
+    assert.equal(modifications().includes("stray.txt"), false);
+  } finally {
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
+test("the Windows installer's refusal says what src/update.mjs says", () => {
+  // PowerShell cannot run here, so this is the string-level equivalent of the
+  // executed POSIX comparison above: each sentence of the Node original is
+  // checked against the PowerShell literal that has to reproduce it.
+  const windows = readScript("install.ps1");
+  const reference = localModificationsMessage(["M src/router.mjs"], "/tmp/checkout");
+
   assert.ok(reference.startsWith("The checkout has local changes to 1 tracked file;"));
   assert.match(
     windows,
@@ -169,29 +286,40 @@ test("the bootstrap installer's refusal says what src/update.mjs says", () => {
 
   assert.match(reference, /^Keep them: {4}git -C \/tmp\/checkout stash$/m);
   assert.match(windows, /"Keep them: {4}git -C \$Directory stash"/);
+  // The one deliberate difference: PowerShell spells its switch -Force.
   assert.match(reference, /^Discard them: re-run the same command with --force$/m);
   assert.match(windows, /"Discard them: re-run the same command with -Force"/);
+  assert.match(windows, /^\s*\[switch\]\$Force,$/m);
 
-  // The preview-and-count behaviour, so a checkout with 40 edited files still
-  // prints a readable error.
   assert.match(windows, /Select-Object -First \$DirtyPreviewLimit/);
   assert.match(windows, /"  \.\.\.and \$Remainder more"/);
-  const declared = windows.match(/^\$DirtyPreviewLimit = (\d+)$/m);
-  assert.ok(declared, "install.ps1 must declare $DirtyPreviewLimit");
-  assert.equal(Number(declared[1]), DIRTY_PREVIEW_LIMIT);
 });
 
-test("the bootstrap installer's force path cannot destroy untracked files", () => {
-  const windows = readFileSync(path.join(root, "install.ps1"), "utf8");
-  const node = readFileSync(path.join(root, "src", "update.mjs"), "utf8");
+test("the POSIX installer's force escape follows its own flag conventions", () => {
+  // install.sh parses long flags in a case statement and sets a shell boolean;
+  // --force is wired the same way rather than inventing a new mechanism.
+  const posix = readScript("install.sh");
+  assert.match(posix, /^\s*--force\)$/m);
+  assert.match(posix, /^force=false$/m);
+  assert.match(posix, /^\s*force=true$/m);
+  assert.match(posix, /--force {12}Discard edits to tracked files/);
+});
 
-  assert.match(windows, /^\s*\[switch\]\$Force,$/m);
-  assert.match(windows, /if \(-not \$Force\) \{ throw \(Get-LocalModificationMessage/);
-  // `reset --hard` restores tracked files and leaves untracked ones alone.
-  assert.match(windows, /git -C \$Directory reset --hard HEAD/);
-  // `git clean` would delete work git was never asked to track. update.mjs has
-  // no such call and neither may the installer that mirrors it.
-  for (const [name, source] of [["install.ps1", windows], ["src/update.mjs", node]]) {
+test("no force path anywhere can destroy untracked files", () => {
+  const node = readScript("src", "update.mjs");
+  for (const { name, source, forceGuard, reset } of BOOTSTRAP_INSTALLERS) {
+    // Refusing is the default; discarding happens only when asked for.
+    assert.match(source, forceGuard, name);
+    // `reset --hard` restores tracked files and leaves untracked ones alone.
+    assert.match(source, reset, name);
+  }
+  assert.match(node, /if \(!force\) throw new Error\(localModificationsMessage\(changes\)\)/);
+  assert.match(node, /git\(\["reset", "--hard", "HEAD"\]/);
+
+  // `git clean` would delete work git was never asked to track. No copy of
+  // this refusal has one, and none may grow one.
+  const sources = [...BOOTSTRAP_INSTALLERS, { name: "src/update.mjs", source: node }];
+  for (const { name, source } of sources) {
     assert.equal(
       /git\b[^\n]*\bclean\b/.test(withoutComments(source)),
       false,
