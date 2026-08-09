@@ -47,8 +47,13 @@ function withoutComments(source) {
 // splatting it into a named-parameter call (@Arguments); both count.
 const FORWARDS_ARGUMENTS = /[@$]Arguments\b/;
 
+// Line endings are normalized because these assertions and the extraction below
+// anchor on "\n". A Windows checkout without the .gitattributes rule -- or with
+// a global core.autocrlf -- hands back "\r\n" and every anchor silently stops
+// matching, which reads as "the shipped script lost this code" rather than as a
+// checkout artifact. Normalizing keeps the failure honest either way.
 function readScript(...parts) {
-  return readFileSync(path.join(root, ...parts), "utf8");
+  return readFileSync(path.join(root, ...parts), "utf8").replace(/\r\n/g, "\n");
 }
 
 // The refusal that blocks an update on a dirty checkout is written three times
