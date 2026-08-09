@@ -14,6 +14,22 @@
   register the task starts the router again rather than leaving the machine with
   none, and stopping a service that was never installed is no longer an error.
 
+- **The Python gateway now installs from a hash-verified lock.** Pinning
+  `litellm[proxy]` and `fastapi` left their entire transitive tree unpinned, so
+  every install resolved and then executed around a hundred packages that
+  nothing had verified — and two machines installing on different days got
+  different trees. `requirements/python.txt` now pins that whole closure with a
+  SHA256 for every distribution, and all four install paths (the `uv` and `pip`
+  branches of `bin/install` and `install.ps1`) install it with
+  `--require-hashes`. The pinned versions are unchanged. The lock is universal:
+  one file covering macOS, Linux, and Windows on CPython 3.10+ through
+  environment markers, rather than a snapshot of whoever generated it. The
+  version literals are gone from the shell scripts entirely — `bin/lock-python`
+  regenerates the lock from `PYTHON_REQUIREMENTS`, and
+  `test/python-lock.test.mjs` fails the suite if the lock, the compile input,
+  and that constant ever disagree, or if either installer stops checking
+  hashes.
+
 - **Text-only models can answer about a pasted image.** A model with no image
   input — DeepSeek, GLM, Kimi — used to refuse the paste outright. When the
   vision bridge is on, a vision model you already have reads the image and
