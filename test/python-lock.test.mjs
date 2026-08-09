@@ -11,6 +11,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  INSTALLER_SCRIPTS,
   PYTHON_LOCK,
   PYTHON_LOCK_INPUT,
   PYTHON_REQUIREMENTS,
@@ -19,10 +20,13 @@ import {
   installerRequirementDrift,
   lockInputRequirements,
   parseLock,
+  pythonInstallCommand,
   pythonLockDrift,
   recordStep,
   stepStatus,
 } from "../src/install-plan.mjs";
+
+const LOCK_WORKFLOW = ".github/workflows/python-lock.yml";
 
 function repoFile(relative) {
   return path.join(SOURCE_ROOT, ...relative.split("/"));
@@ -94,6 +98,54 @@ test("both installers install the lock with hash checking in every branch", () =
       );
     }
   }
+});
+
+test("each installer branch yields exactly one runnable install command", () => {
+  for (const [platform, script] of Object.entries(INSTALLER_SCRIPTS)) {
+    const commands = ["uv", "pip"].map((tool) => pythonInstallCommand(tool, { platform }));
+    for (const command of commands) {
+      assert.ok(command.includes("--require-hashes"), `${script}: ${command} drops hash checking`);
+      assert.ok(command.includes(`-r ${PYTHON_LOCK}`), `${script}: ${command} does not name the lock`);
+      // A leading comment marker would mean the matcher picked up prose.
+      assert.doesNotMatch(command, /^[#&]?\s*#/, `${script}: matched a comment, not a command`);
+    }
+    // The uv branch and the pip branch must be two different commands; a
+    // matcher that returned the same line twice would leave one branch of the
+    // shipped installer completely unexercised by CI.
+    assert.notEqual(commands[0], commands[1], `${script}: uv and pip resolved to the same line`);
+  }
+});
+
+test("an unknown tool or platform is refused rather than guessed", () => {
+  assert.throws(() => pythonInstallCommand("poetry"), /Unknown install tool/);
+  assert.throws(() => pythonInstallCommand("uv", { platform: "plan9" }), /Unknown installer platform/);
+});
+
+// The whole point of the CI job is that it runs the *shipped* command. A future
+// edit that pastes a pip line into the workflow would make it possible for CI
+// to pass while bin/install fails, which is the gap it was added to close.
+test("the lock workflow derives its install command from the installer", () => {
+  const workflow = readFileSync(repoFile(LOCK_WORKFLOW), "utf8");
+  assert.match(workflow, /install-plan\.mjs python-install-command/);
+  const handWritten = workflow
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("#"))
+    .filter((line) => /(uv\s+pip|-m\s+pip)\s+install\s/.test(line))
+    .filter((line) => line.includes(PYTHON_LOCK));
+  assert.deepEqual(handWritten, [], "the workflow must not spell the install command itself");
+});
+
+// A paths filter that stops covering an input turns the job off silently for
+// exactly the change that needed it.
+test("the lock workflow is gated on every input that can invalidate the lock", () => {
+  const workflow = readFileSync(repoFile(LOCK_WORKFLOW), "utf8");
+  const gated = ["requirements/**", ...Object.values(INSTALLER_SCRIPTS), "src/install-plan.mjs"];
+  for (const input of gated) {
+    assert.ok(workflow.includes(`"${input}"`), `${LOCK_WORKFLOW} does not run when ${input} changes`);
+  }
+  // Paths filters cannot see a wheel PyPI yanked under an unchanged lock, so
+  // the schedule is part of the gate rather than a nicety.
+  assert.match(workflow, /^\s*schedule:/m, `${LOCK_WORKFLOW} must also run on a schedule`);
 });
 
 test("a regenerated lock reinstalls even when the pins are unchanged", () => {

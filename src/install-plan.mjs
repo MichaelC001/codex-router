@@ -414,6 +414,44 @@ export function installerRequirementDrift(root = SOURCE_ROOT) {
   );
 }
 
+// Slash-separated for the same reason PYTHON_LOCK is: these are repository
+// paths, resolved through repoPath, not host paths.
+export const INSTALLER_SCRIPTS = { posix: "bin/install", windows: "install.ps1" };
+
+// Which of the two extracted lines belongs to which branch. `uv pip install`
+// and `<python> -m pip install` are disjoint by construction, so neither
+// pattern can claim the other's line.
+const INSTALL_TOOLS = {
+  uv: /(?:^|\s)uv\s+pip\s+install\s/,
+  pip: /(?:^|\s)-m\s+pip\s+install\s/,
+};
+
+// CI installs the lock by running the installer's *own* command rather than a
+// hand-written pip line, so the job cannot pass while the shipped installer
+// fails. The line is extracted verbatim by the same matcher
+// `installerRequirementDrift` uses, and it is returned ready to execute in the
+// checkout root: the posix lines already name `.venv/bin/python`, and the
+// PowerShell lines expect the `$Python` that install.ps1 itself defines.
+export function pythonInstallCommand(tool, { root = SOURCE_ROOT, platform = "posix" } = {}) {
+  const script = INSTALLER_SCRIPTS[platform];
+  if (!script) {
+    throw new Error(`Unknown installer platform: ${platform} (expected posix or windows)`);
+  }
+  const pattern = INSTALL_TOOLS[tool];
+  if (!pattern) throw new Error(`Unknown install tool: ${tool} (expected uv or pip)`);
+  const contents = readFile(repoPath(root, script));
+  if (contents === undefined) throw new Error(`${script} is missing`);
+  const matches = installerPythonInstalls(contents)
+    .map((line) => line.trim())
+    .filter((line) => pattern.test(line));
+  if (matches.length !== 1) {
+    throw new Error(
+      `${script} has ${matches.length} hash-checked ${tool} install command(s); expected exactly 1`,
+    );
+  }
+  return matches[0];
+}
+
 function main(argv) {
   const [command, step] = argv;
   if (command === "status") {
@@ -451,8 +489,15 @@ function main(argv) {
     process.stdout.write(`${PYTHON_REQUIREMENTS.join("\n")}\n`);
     return 0;
   }
+  // `python-install-command <uv|pip> [posix|windows]` — what CI runs so that it
+  // exercises the shipped installer's command rather than a copy of it.
+  if (command === "python-install-command") {
+    process.stdout.write(`${pythonInstallCommand(step, { platform: argv[2] || "posix" })}\n`);
+    return 0;
+  }
   console.error(
-    "Usage: install-plan.mjs status|record <node-deps|python-deps> | tray-plan | record-tray | requirements",
+    "Usage: install-plan.mjs status|record <node-deps|python-deps> | tray-plan | record-tray | " +
+      "requirements | python-install-command <uv|pip> [posix|windows]",
   );
   return 2;
 }

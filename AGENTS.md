@@ -113,6 +113,17 @@ dependency tree. That tree is pinned and hashed rather than re-resolved.
    environment pip and uv create for an sdist. `maturin` is fetched unhashed
    during that build. Closing that gap needs a separate build-requirements
    lock; do not claim the current lock covers it.
+6. The lock is proven by installing it, not by reasoning about it.
+   `.github/workflows/python-lock.yml` installs it for real on Linux and
+   Windows through both resolvers, then asserts the pinned versions, the
+   `litellm[proxy]` extra, and a live `/health/liveliness`. It gets the command
+   from `install-plan.mjs python-install-command`, which extracts the line from
+   `bin/install` and `install.ps1` themselves — never write a `pip install` line
+   into CI, because a job that spells its own command can pass while the
+   shipped installer fails. Its negative control must also keep failing: if an
+   unhashed requirement ever installs, every other check in that job is
+   meaningless. Do not add a resolver cache there; a cache hit can serve an
+   already-unpacked wheel and skip the hash check the job exists to perform.
 
 ## Requests to install or expose more models
 
