@@ -91,9 +91,11 @@
   not flood its own access log), while an abort is retried at once with a wider
   window, because the window it already spent is backoff enough and gives no
   evidence the service is dead. A timeout now also says which of the two it
-  saw. Genuine failures get faster, not slower: a child that exits now aborts
-  the probe in flight and cuts the backoff short, so a crash is reported
-  immediately instead of up to three seconds later.
+  saw. A service that genuinely died is still reported the same way it always
+  was, by the exit check between the probe and the sleep: waking that sleep from
+  the child's own exit callback would report it sooner, and kills the process on
+  Windows with a libuv assertion while it is reporting the failure it had
+  already diagnosed correctly.
 
 ## 0.4.0-beta.2
 
