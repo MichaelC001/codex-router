@@ -33,7 +33,6 @@ import { probeDelayMs, probeTimeoutMs } from "./health-backoff.mjs";
 // on narrow probes that cannot conclude anything -- and a service that died is
 // still reported sooner than it used to be, because the backoff sleep after the
 // probe is cut short the moment the child exits.
-const PROBE_TIMED_OUT = Symbol("probe timed out");
 
 function hasExited(child) {
   return Boolean(child) && (child.exitCode !== null || child.signalCode !== null);
@@ -101,11 +100,19 @@ export async function waitForHealth({
       assertStillStarting();
 
       const windowMs = probeTimeoutMs(attempt);
-      const controller = new AbortController();
-      const probeTimer = setTimeout(() => controller.abort(PROBE_TIMED_OUT), windowMs);
       let timedOut = false;
       try {
-        const response = await fetchImpl(url, { headers, signal: controller.signal });
+        // AbortSignal.timeout rather than a hand-rolled AbortController and
+        // setTimeout. The two look interchangeable and are not: this is the
+        // mechanism that was here before, it is managed by Node rather than by
+        // a userland timer this loop has to remember to clear on every exit
+        // path, and a manual controller here crashed Node on Windows -- a libuv
+        // assertion in win/async.c, killing startup with 0xC0000409 while it was
+        // reporting a failure it had already diagnosed correctly.
+        const response = await fetchImpl(url, {
+          headers,
+          signal: AbortSignal.timeout(windowMs),
+        });
         if (response.ok) {
           if (!expectedService) return;
           const payload = await response.json().catch(() => ({}));
@@ -114,13 +121,15 @@ export async function waitForHealth({
         } else {
           lastFailure = `the service answered HTTP ${response.status}`;
         }
-      } catch {
-        timedOut = controller.signal.reason === PROBE_TIMED_OUT;
+      } catch (error) {
+        // The distinction the whole fix rests on. A refusal is conclusive; a
+        // window we closed ourselves concluded nothing. AbortSignal.timeout
+        // rejects with a TimeoutError, and undici surfaces it either directly
+        // or wrapped, so check both.
+        timedOut = error?.name === "TimeoutError" || error?.cause?.name === "TimeoutError";
         lastFailure = timedOut
           ? `the service did not answer within ${windowMs} ms`
           : "the connection was refused";
-      } finally {
-        clearTimeout(probeTimer);
       }
 
       const wait = timedOut

@@ -41,7 +41,12 @@ function answersAfter(answerAfterMs, body = {}) {
       const onAbort = () => {
         clearTimeout(timer);
         abortDurations.push(Date.now() - started);
-        reject(new Error("aborted"));
+        // Reject with the signal's own reason, which is what fetch does. For
+        // AbortSignal.timeout that reason is a TimeoutError, and telling a
+        // timeout apart from a refusal is the distinction this module exists
+        // to draw -- a fake that flattened both to a plain Error would let a
+        // broken classifier pass.
+        reject(signal.reason ?? new Error("aborted"));
       };
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
