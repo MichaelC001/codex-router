@@ -528,3 +528,41 @@ test("a retryable status is not retried once something has been relayed", async 
   assert.equal(result.retries, 0);
   assert.equal(result.response.status, 503);
 });
+
+// A retried turn costs a duplicated request; a retried image generation costs
+// the operator a second billed image. The retryable statuses were chosen to
+// mean "no response was obtained", but that is reasoning rather than anything
+// observable from here, and Cloudflare can emit 520 after reaching the origin.
+// So the billed path keeps the pre-retry behaviour, and this test is what stops
+// it being switched on again by someone generalizing the turn path.
+test("an image generation is never retried, however retryable the failure looks", async () => {
+  const attempts = [];
+  const native = await mockServer(async (request, response) => {
+    attempts.push(await readBody(request));
+    response.writeHead(503, { "Content-Type": "text/plain" });
+    response.end(EDGE_503_BODY);
+  });
+  const stateDir = stateDirectory();
+  const routerPort = await openPort();
+  const router = startRouter({ nativePort: native.port, routerPort, stateDir });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const result = await fetch(`${routerBase(routerPort)}/images/generations`, {
+      method: "POST",
+      headers: { Authorization: "Bearer caller", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gpt-image-1", prompt: "a billed image" }),
+    });
+
+    assert.equal(result.status, 503, "the upstream failure must reach the caller");
+    assert.equal(
+      attempts.length,
+      1,
+      `a billed image generation was sent ${attempts.length} times`,
+    );
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

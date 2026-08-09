@@ -1383,6 +1383,15 @@ async function handleNativeImage(request, response, requestUrl) {
         signal: controller.signal,
       },
       {
+        // Images do not retry. The retryable statuses were chosen to mean "no
+        // response was obtained", but that is reasoning rather than something
+        // observable from here, and Cloudflare can emit 520 after reaching the
+        // origin. On a turn a wrong guess costs a duplicated request; on an
+        // image generation it costs the operator a second billed image. The
+        // failure this exists to absorb was reported on /v1/responses, so the
+        // turn path keeps the benefit and the billed path keeps the old
+        // behaviour until a captured 5xx proves it is safe.
+        retries: 0,
         canRetry: () => nothingRelayed(response),
         onRetry: (event) => logUpstreamRetry(event, requestedModel, requestUrl.pathname),
       },
