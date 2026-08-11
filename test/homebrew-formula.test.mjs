@@ -150,6 +150,9 @@ test("the generated formula owns upgrades and preserves one-time setup", () => {
   assert.doesNotMatch(formula, /Formula\["node"\]\.opt_bin/);
   assert.match(formula, /CODEX_ROUTER_SOURCE_ROOT/);
   assert.match(formula, /CODEX_ROUTER_PACKAGE_MANAGER=homebrew/);
+  assert.match(formula, /install_plan = libexec\/"src\/install-plan\.mjs"/);
+  assert.match(formula, /if install_plan\.exist\?/);
+  assert.match(formula, /install_plan, "record", "node-deps"/);
   assert.match(formula, /exec .*model-router.* codex "\$@"/);
   assert.match(formula, /manifest\.dig\("current", "packageManager"\) != "homebrew"/);
   assert.match(formula, /codex-router setup --guided/);

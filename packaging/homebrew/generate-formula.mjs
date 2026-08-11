@@ -293,8 +293,14 @@ ${exclusionComment}${resourceBlocks}
       ) do
         venv.pip_install relaxed
       end
-      system formula_opt_bin("node")/"node", "src/install-plan.mjs", "record", "node-deps"
-      system formula_opt_bin("node")/"node", "src/install-plan.mjs", "record", "python-deps"
+      # Older release archives predate the dependency fingerprint helper. The
+      # dependencies are already installed at this point, so those archives
+      # remain usable; newer releases record fingerprints for faster updates.
+      install_plan = libexec/"src/install-plan.mjs"
+      if install_plan.exist?
+        system formula_opt_bin("node")/"node", install_plan, "record", "node-deps"
+        system formula_opt_bin("node")/"node", install_plan, "record", "python-deps"
+      end
     end
 
     (bin/"codex-router").write <<~SH
