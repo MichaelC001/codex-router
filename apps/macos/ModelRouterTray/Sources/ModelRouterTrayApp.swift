@@ -2650,123 +2650,20 @@ private struct TrayView: View {
     // `hf.co/user/repo:Q4_K_M` tag, a long role phrase -- truncates in place,
     // which keeps the buttons on screen instead of pushing them past the edge.
     @ViewBuilder private var localLlmPanel: some View {
-      VStack(alignment: .leading, spacing: 8) {
-        Text("Models on this Mac, through Ollama. Check one to offer it to Codex as a chat model.")
+      VStack(alignment: .leading, spacing: 10) {
+        Text("Run models locally through Ollama. Enable an installed model to make it available to Codex.")
           .font(.system(size: 9))
           .foregroundStyle(routerMuted)
         if let download = store.localDownload {
           localDownloadStatus(download)
         }
-        if sortedLocalModels.isEmpty {
-          Text("Nothing installed yet. Pick one below, or paste any Ollama model URL/tag.")
-            .font(.system(size: 9))
-            .foregroundStyle(routerMutedStrong)
-        } else {
-          // Names the checkbox column, which otherwise reads as a mystery
-          // control: checking a model is what offers it to Codex as a chat
-          // model, and that is the only thing the checkbox does.
-          HStack(spacing: 0) {
-            Text("CODEX")
-              .frame(width: Self.checkColumnWidth, alignment: .leading)
-            Text("MODEL")
-            Spacer()
-            Text("SIZE")
-          }
-          .font(.system(size: 8, weight: .semibold))
-          .foregroundStyle(routerMuted)
-          .padding(.horizontal, 2)
-          VStack(spacing: 7) {
-            ForEach(sortedLocalModels) { model in
-              installedLocalRow(model)
-            }
-          }
-        }
-        // Knowing a tag by heart is not a reasonable prerequisite for trying a
-        // local model, and the text field below was the only way in. These are
-        // rated against this machine's memory, so nothing offered here is
-        // something it cannot run.
-        if !suggestedLocalModels.isEmpty {
-          Divider().padding(.vertical, 2)
-          downloadHeader("FOR CODING · EXPERIMENTAL", detail: "~9K to work in after Codex's prompt")
-          VStack(spacing: 6) {
-            ForEach(suggestedLocalModels) { model in
-              availableLocalRow(model)
-            }
-          }
-        }
-        if !suggestedVisionModels.isEmpty {
-          downloadHeader("FOR READING IMAGES ONLY", detail: "cannot code")
-          VStack(spacing: 6) {
-            ForEach(suggestedVisionModels) { model in
-              availableVisionRow(model)
-            }
-          }
-        }
-        // Group the long Ollama tag list by family. The family headers stay
-        // scannable, while each section keeps its recommended variant visible
-        // and tucks quantizations and hardware-specific builds underneath.
+        localInstalledSection
+        localQuickPicksSection
         if let explore = localModels?.availableExplore, !explore.isEmpty {
-          let cloudCount = explore.filter { $0.downloadable == false }.count
-          let visibleVariantCount = localCatalogFamilies.reduce(0) { $0 + $1.models.count }
-          let visibleCloudCount = localCatalogFamilies
-            .flatMap(\.models)
-            .filter { $0.downloadable == false }
-            .count
-          let showingAllCatalog = localCatalogFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-          let shownCloudCount = showingAllCatalog ? cloudCount : visibleCloudCount
-          let catalogDetail = showingAllCatalog
-            ? "\(localCatalogFamilies.count) families · \(explore.count) variants"
-            : "\(localCatalogFamilies.count) families · \(visibleVariantCount) matches"
-          downloadHeader(
-            "OLLAMA CATALOG",
-            detail: catalogDetail +
-              (shownCloudCount > 0
-                ? " · \(shownCloudCount) cloud-only"
-                : "")
-          )
-          HStack(spacing: 6) {
-            TextField("Filter families or tags", text: $localCatalogFilter)
-              .textFieldStyle(.roundedBorder)
-              .font(.system(size: 10))
-            if !localCatalogFilter.isEmpty {
-              Button("Clear") { localCatalogFilter = "" }
-                .buttonStyle(.borderless)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(routerMutedStrong)
-            }
-          }
-          if localCatalogFamilies.isEmpty {
-            Text("No Ollama tags match \"\(localCatalogFilter)\".")
-              .font(.system(size: 9))
-              .foregroundStyle(routerMutedStrong)
-          } else {
-            VStack(spacing: 5) {
-              ForEach(localCatalogFamilies) { family in
-                AccordionPanel(
-                  title: family.displayName,
-                  summary: localFamilySummary(family),
-                  expanded: localFamilyBinding(family.id)
-                ) {
-                  localFamilyPanel(family)
-                }
-              }
-            }
-          }
+          localCatalogSection(explore)
         }
-        Divider().padding(.vertical, 2)
-        HStack(spacing: 6) {
-          TextField("Tag or URL, e.g. gemma4:12b or ollama.com/library/gemma4:12b", text: $installTag)
-            .textFieldStyle(.roundedBorder)
-            .font(.system(size: 10))
-            .disabled(busy || store.localDownload?.isRunning == true)
-            .onSubmit { submitInstall() }
-          Button("Install") { submitInstall() }
-            .buttonStyle(.borderless)
-            .font(.system(size: 9, weight: .medium))
-            .foregroundStyle(canInstall ? routerMint : routerMutedStrong)
-            .disabled(!canInstall)
-        }
-        Button(localDetailsExpanded ? "Hide machine details" : "Machine details") {
+        localInstallSection
+        Button(localDetailsExpanded ? "Hide machine & runtime" : "Machine & runtime") {
           withAnimation(.easeOut(duration: 0.15)) { localDetailsExpanded.toggle() }
         }
         .buttonStyle(.borderless)
@@ -2778,26 +2675,166 @@ private struct TrayView: View {
       }
     }
 
-    private func localFamilySummary(_ family: LocalCatalogFamily) -> String {
-      let fits = family.models.filter(localModelFits).count
-      let cloud = family.models.filter { $0.downloadable == false }.count
-      var parts = ["\(family.models.count) variants", "\(fits) fit"]
-      if cloud > 0 { parts.append("\(cloud) cloud") }
-      return parts.joined(separator: " · ")
+    @ViewBuilder private var localInstalledSection: some View {
+      let installedCount = sortedLocalModels.count
+      let detail = installedCount == 0
+        ? "none installed"
+        : "\(installedCount) installed · \(String(format: "%.1f", localModels?.totalGb ?? 0)) GB"
+      downloadHeader("ON THIS MAC", detail: detail)
+      if sortedLocalModels.isEmpty {
+        Text("Nothing installed yet. Start with a quick pick or browse the Ollama catalog below.")
+          .font(.system(size: 9))
+          .foregroundStyle(routerMutedStrong)
+      } else {
+        HStack(spacing: 0) {
+          Text("CODEX")
+            .frame(width: Self.checkColumnWidth, alignment: .leading)
+          Text("MODEL")
+          Spacer()
+          Text("SIZE")
+        }
+        .font(.system(size: 8, weight: .semibold))
+        .foregroundStyle(routerMuted)
+        .padding(.horizontal, 2)
+        VStack(spacing: 7) {
+          ForEach(sortedLocalModels) { model in
+            installedLocalRow(model)
+          }
+        }
+      }
+    }
+
+    @ViewBuilder private var localQuickPicksSection: some View {
+      if !suggestedLocalModels.isEmpty || !suggestedVisionModels.isEmpty {
+        downloadHeader("QUICK PICKS", detail: "rated for this Mac")
+        if !suggestedLocalModels.isEmpty {
+          Text("CODING · EXPERIMENTAL")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(routerMuted)
+          VStack(spacing: 6) {
+            ForEach(suggestedLocalModels) { model in
+              availableLocalRow(model)
+            }
+          }
+        }
+        if !suggestedVisionModels.isEmpty {
+          Text("IMAGE READING · DOES NOT CODE")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(routerMuted)
+            .padding(.top, 2)
+          VStack(spacing: 6) {
+            ForEach(suggestedVisionModels) { model in
+              availableVisionRow(model)
+            }
+          }
+        }
+      }
+    }
+
+    @ViewBuilder private func localCatalogSection(_ explore: [AvailableLocalModel]) -> some View {
+      let cloudCount = explore.filter { $0.downloadable == false }.count
+      let visibleVariantCount = localCatalogFamilies.reduce(0) { $0 + $1.models.count }
+      let visibleCloudCount = localCatalogFamilies
+        .flatMap(\.models)
+        .filter { $0.downloadable == false }
+        .count
+      let showingAllCatalog = localCatalogFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      let shownCloudCount = showingAllCatalog ? cloudCount : visibleCloudCount
+      let catalogDetail = showingAllCatalog
+        ? "\(localCatalogFamilies.count) families · \(explore.count) variants"
+        : "\(localCatalogFamilies.count) families · \(visibleVariantCount) matches"
+      downloadHeader(
+        "DISCOVER OLLAMA",
+        detail: catalogDetail +
+          (shownCloudCount > 0 ? " · \(shownCloudCount) cloud-only" : "")
+      )
+      HStack(spacing: 6) {
+        TextField("Search family or tag", text: $localCatalogFilter)
+          .textFieldStyle(.roundedBorder)
+          .font(.system(size: 10))
+        if !localCatalogFilter.isEmpty {
+          Button("Clear") { localCatalogFilter = "" }
+            .buttonStyle(.borderless)
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(routerMutedStrong)
+        }
+      }
+      if localCatalogFamilies.isEmpty {
+        Text("No Ollama tags match \"\(localCatalogFilter)\".")
+          .font(.system(size: 9))
+          .foregroundStyle(routerMutedStrong)
+          .padding(.top, 2)
+      } else {
+        VStack(spacing: 0) {
+          ForEach(localCatalogFamilies) { family in
+            localFamilySection(family)
+          }
+        }
+      }
+    }
+
+    @ViewBuilder private var localInstallSection: some View {
+      downloadHeader("INSTALL A MODEL", detail: "Ollama tag or URL")
+      Text("Paste any Ollama tag or model-page URL. Ollama stays headless and download progress appears above.")
+        .font(.system(size: 8))
+        .foregroundStyle(routerMuted)
+      HStack(spacing: 6) {
+        TextField("gemma4:12b or ollama.com/library/gemma4:12b", text: $installTag)
+          .textFieldStyle(.roundedBorder)
+          .font(.system(size: 10))
+          .disabled(busy || store.localDownload?.isRunning == true)
+          .onSubmit { submitInstall() }
+        Button("Install") { submitInstall() }
+          .buttonStyle(.borderless)
+          .font(.system(size: 9, weight: .medium))
+          .foregroundStyle(canInstall ? routerMint : routerMutedStrong)
+          .disabled(!canInstall)
+      }
+    }
+
+    @ViewBuilder private func localFamilySection(_ family: LocalCatalogFamily) -> some View {
+      Button(action: {
+        withAnimation(.easeOut(duration: 0.15)) {
+          if expandedLocalFamilies.contains(family.id) {
+            expandedLocalFamilies.remove(family.id)
+          } else {
+            expandedLocalFamilies.insert(family.id)
+          }
+        }
+      }) {
+        HStack(spacing: 8) {
+          VStack(alignment: .leading, spacing: 2) {
+            Text(family.displayName)
+              .font(.system(size: 10, weight: .medium))
+              .lineLimit(1)
+            Text(localFamilySummary(family))
+              .font(.system(size: 8))
+              .foregroundStyle(routerMutedStrong)
+              .lineLimit(1)
+          }
+          Spacer(minLength: 4)
+          Image(systemName: expandedLocalFamilies.contains(family.id) ? "chevron.down" : "chevron.right")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(routerMuted)
+        }
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      if expandedLocalFamilies.contains(family.id) {
+        localFamilyPanel(family)
+          .padding(.bottom, 7)
+      }
+      Divider()
     }
 
     @ViewBuilder private func localFamilyPanel(_ family: LocalCatalogFamily) -> some View {
       let recommended = recommendedLocalVariant(in: family.models)
       if let recommended {
-        HStack(spacing: 4) {
-          Text("RECOMMENDED")
-          Text(recommended.variant ?? recommended.tag)
-            .foregroundStyle(routerMutedStrong)
-            .lineLimit(1)
-        }
-        .font(.system(size: 8, weight: .semibold))
-        .foregroundStyle(routerMint)
-        .padding(.bottom, 1)
+        Text("BEST FIT FOR THIS MAC")
+          .font(.system(size: 8, weight: .semibold))
+          .foregroundStyle(routerMint)
+          .padding(.bottom, 1)
         exploreLocalRow(recommended, isRecommended: true)
       }
 
@@ -3257,21 +3294,26 @@ private struct TrayView: View {
         && model.diskFit != "too-large"
     }
 
-    private func recommendedLocalVariant(in models: [AvailableLocalModel]) -> AvailableLocalModel? {
-      models.first(where: localModelFits) ?? models.first
+    private func localFamilySummary(_ family: LocalCatalogFamily) -> String {
+      let fits = family.models.filter(localModelFits).count
+      let cloud = family.models.filter { $0.downloadable == false }.count
+      let best = recommendedLocalVariant(in: family.models).map { "best \($0.variant ?? $0.tag)" }
+      var parts = ["\(family.models.count) variants"]
+      if let best { parts.append(best) }
+      parts.append("\(fits) fit")
+      if cloud > 0 { parts.append("\(cloud) cloud") }
+      return parts.joined(separator: " · ")
     }
 
-    private func localFamilyBinding(_ family: String) -> Binding<Bool> {
-      Binding(
-        get: { expandedLocalFamilies.contains(family) },
-        set: { expanded in
-          if expanded {
-            expandedLocalFamilies.insert(family)
-          } else {
-            expandedLocalFamilies.remove(family)
-          }
+    private func recommendedLocalVariant(in models: [AvailableLocalModel]) -> AvailableLocalModel? {
+      if let fitting = models.first(where: localModelFits) { return fitting }
+      return models
+        .filter { $0.downloadable != false }
+        .min {
+          if $0.sizeGb != $1.sizeGb { return $0.sizeGb < $1.sizeGb }
+          return $0.tag.localizedCaseInsensitiveCompare($1.tag) == .orderedAscending
         }
-      )
+        ?? models.first
     }
 
     // Useful first: models that actually drive Codex, then the rest that can
