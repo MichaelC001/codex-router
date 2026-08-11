@@ -2453,7 +2453,9 @@ private struct TrayView: View {
     @State private var subagentsExpanded = true
     @State private var pickerExpanded = true
     @State private var visionExpanded = true
-    @State private var localLlmExpanded = false
+    // Local models are a first-class install surface. Keep this section open
+    // on launch so the catalog is not hidden behind the other settings cards.
+    @State private var localLlmExpanded = true
     @State private var localDetailsExpanded = false
     @State private var installTag = ""
     @State private var armedRemoval: String?
@@ -2690,12 +2692,23 @@ private struct TrayView: View {
             }
           }
         }
+        // The full catalog belongs in the Local LLM panel itself. A summary
+        // plus a hidden disclosure made the new models invisible in the tray,
+        // which looked exactly like the old build. Every row has the same
+        // machine-fit result and Download action as the curated suggestions.
         if let explore = localModels?.availableExplore, !explore.isEmpty {
           let cloudCount = explore.filter { $0.downloadable == false }.count
-          Text("EXPLORE: \(explore.count) Ollama tags across \(localModels?.families?.count ?? 0) families\(cloudCount > 0 ? " · \(cloudCount) cloud-only" : "") · fit status in View more")
-            .font(.system(size: 8))
-            .foregroundStyle(routerMuted)
-            .lineLimit(2)
+          Divider().padding(.vertical, 2)
+          downloadHeader(
+            "ALL OLLAMA TAGS",
+            detail: "\(explore.count) tags · \(localModels?.families?.count ?? 0) families" +
+              (cloudCount > 0 ? " · \(cloudCount) cloud-only" : "")
+          )
+          VStack(spacing: 6) {
+            ForEach(explore) { model in
+              exploreLocalRow(model)
+            }
+          }
         }
         Divider().padding(.vertical, 2)
         HStack(spacing: 6) {
@@ -2710,8 +2723,7 @@ private struct TrayView: View {
             .foregroundStyle(canInstall ? routerMint : routerMutedStrong)
             .disabled(!canInstall)
         }
-        let exploreCount = localModels?.availableExplore?.count ?? 0
-        Button(localDetailsExpanded ? "Hide details" : (exploreCount > 0 ? "View more · \(exploreCount) tags" : "View more")) {
+        Button(localDetailsExpanded ? "Hide machine details" : "Machine details") {
           withAnimation(.easeOut(duration: 0.15)) { localDetailsExpanded.toggle() }
         }
         .buttonStyle(.borderless)
@@ -2761,15 +2773,6 @@ private struct TrayView: View {
         Text("Speed is measured after install with Ollama's eval counters; unmeasured models show no invented number.")
           .font(.system(size: 8))
           .foregroundStyle(routerMuted)
-        if let explore = localModels?.availableExplore, !explore.isEmpty {
-          Divider().padding(.vertical, 2)
-          Text("EXPLORE OLLAMA FAMILIES")
-            .font(.system(size: 8, weight: .semibold))
-            .foregroundStyle(routerMuted)
-          ForEach(explore) { model in
-            exploreLocalRow(model)
-          }
-        }
       }
       .padding(.horizontal, 2)
     }
@@ -3119,9 +3122,14 @@ private struct TrayView: View {
       if let download = store.localDownload, download.status == "error" {
         return "Last download failed"
       }
-      guard let localModels, localModels.installed > 0 else { return "none installed" }
+      guard let localModels, localModels.installed > 0 else {
+        let available = localModels?.availableExplore?.count ?? 0
+        return available > 0 ? "none installed · \(available) available" : "none installed"
+      }
       let chat = localModels.usableAsChat ?? 0
-      return "\(localModels.installed) installed · \(chat) for Codex · \(String(format: "%.1f", localModels.totalGb)) GB"
+      let available = localModels.availableExplore?.count ?? 0
+      let suffix = available > 0 ? " · \(available) available" : ""
+      return "\(localModels.installed) installed · \(chat) for Codex · \(String(format: "%.1f", localModels.totalGb)) GB\(suffix)"
     }
 
     private var canInstall: Bool {
