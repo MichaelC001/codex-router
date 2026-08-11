@@ -2707,11 +2707,8 @@ private struct TrayView: View {
     @ViewBuilder private var localQuickPicksSection: some View {
       if !suggestedLocalModels.isEmpty || !suggestedVisionModels.isEmpty {
         downloadHeader("QUICK PICKS", detail: "shortlist for this Mac")
-        Text("The smallest, lower-risk starting points. Expand when you want the full set.")
-          .font(.system(size: 8))
-          .foregroundStyle(routerMutedStrong)
         if !visibleQuickCodingModels.isEmpty {
-          Text("CODING · EXPERIMENTAL")
+          Text("CODING")
             .font(.system(size: 8, weight: .semibold))
             .foregroundStyle(routerMuted)
           VStack(spacing: 3) {
@@ -2721,7 +2718,7 @@ private struct TrayView: View {
           }
         }
         if !visibleQuickVisionModels.isEmpty {
-          Text("IMAGE READING · DOES NOT CODE")
+          Text("IMAGE READING")
             .font(.system(size: 8, weight: .semibold))
             .foregroundStyle(routerMuted)
             .padding(.top, 2)
@@ -2786,7 +2783,7 @@ private struct TrayView: View {
 
     @ViewBuilder private var localInstallSection: some View {
       downloadHeader("INSTALL A MODEL", detail: "Ollama tag or URL")
-      Text("Paste any Ollama tag or model-page URL. Ollama stays headless and download progress appears above.")
+      Text("Use a tag or model-page URL. Downloads stay headless.")
         .font(.system(size: 8))
         .foregroundStyle(routerMuted)
       HStack(spacing: 6) {
@@ -2847,6 +2844,16 @@ private struct TrayView: View {
           .foregroundStyle(routerMint)
           .padding(.bottom, 1)
         exploreLocalRow(recommended, isRecommended: true)
+      } else if family.models.allSatisfy({ $0.downloadable == false }) {
+        Text("CLOUD ONLY · NO LOCAL DOWNLOAD")
+          .font(.system(size: 8, weight: .semibold))
+          .foregroundStyle(routerMutedStrong)
+          .padding(.bottom, 1)
+      } else {
+        Text("NO LOCAL VARIANT FITS THIS MAC")
+          .font(.system(size: 8, weight: .semibold))
+          .foregroundStyle(routerRed)
+          .padding(.bottom, 1)
       }
 
       let variants = family.models.filter { $0.tag != recommended?.tag }
@@ -3306,23 +3313,22 @@ private struct TrayView: View {
     private func localFamilySummary(_ family: LocalCatalogFamily) -> String {
       let fits = family.models.filter(localModelFits).count
       let cloud = family.models.filter { $0.downloadable == false }.count
-      let best = recommendedLocalVariant(in: family.models).map { "best \($0.variant ?? $0.tag)" }
       var parts = ["\(family.models.count) variants"]
-      if let best { parts.append(best) }
-      parts.append("\(fits) fit")
-      if cloud > 0 { parts.append("\(cloud) cloud") }
+      if fits > 0 {
+        parts.append("\(fits) fit")
+      } else if cloud == family.models.count {
+        parts.append("cloud only")
+      } else {
+        parts.append("none fit")
+      }
+      if cloud > 0 && cloud < family.models.count { parts.append("\(cloud) cloud") }
       return parts.joined(separator: " · ")
     }
 
     private func recommendedLocalVariant(in models: [AvailableLocalModel]) -> AvailableLocalModel? {
-      if let fitting = models.first(where: localModelFits) { return fitting }
-      return models
-        .filter { $0.downloadable != false }
-        .min {
-          if $0.sizeGb != $1.sizeGb { return $0.sizeGb < $1.sizeGb }
-          return $0.tag.localizedCaseInsensitiveCompare($1.tag) == .orderedAscending
-        }
-        ?? models.first
+      // A recommendation is useful only when it can actually run here. Do not
+      // relabel the smallest impossible download as a "best fit" choice.
+      return models.first(where: localModelFits)
     }
 
     // Useful first: models that actually drive Codex, then the rest that can
