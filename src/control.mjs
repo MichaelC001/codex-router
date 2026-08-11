@@ -627,6 +627,18 @@ function refreshModelSettingsCatalog({ routes = false } = {}) {
   }
 }
 
+async function restartRouterForLocalRoutes() {
+  // User-model routes live in files the running router only reads at startup,
+  // so a local model toggle needs the same service reload curated-model apply
+  // performs. Foreground/dev routers have no service and are skipped.
+  const { restartRouterServiceIfInstalled } = await import("./router-restart.mjs");
+  const restarted = restartRouterServiceIfInstalled();
+  if (restarted) {
+    process.stderr.write("Router service restarted so local routes are live.\n");
+  }
+  return restarted;
+}
+
 async function knownModelSlug(slug) {
   try {
     const { MERGED_CATALOG_PATH } = await import("./paths.mjs");
@@ -960,6 +972,7 @@ async function handleVisionBridge(action, value, extra) {
 async function handleLocalModels(action, value, flag) {
   const {
     localModelsSnapshot,
+    readLocalModelSelection,
     removeLocalModel,
     setLocalModelEnabled,
   } = await import("./local-models.mjs");
@@ -1183,12 +1196,16 @@ async function handleLocalModels(action, value, flag) {
     if (!tag) throw new Error("Usage: control local-models uninstall <model-tag> --yes");
     removeLocalModel(tag, { confirmed: flag === "--yes" || value === "--yes" });
     refreshModelSettingsCatalog({ routes: true });
+    await restartRouterForLocalRoutes();
   } else if (action === "set") {
     if (!["on", "off"].includes(flag)) {
       throw new Error("Usage: control local-models set <model-tag> <on|off>");
     }
-    setLocalModelEnabled(value, flag === "on");
+    const enabled = flag === "on";
+    const wasEnabled = readLocalModelSelection().enabled.includes(String(value).trim());
+    setLocalModelEnabled(value, enabled);
     refreshModelSettingsCatalog({ routes: true });
+    if (wasEnabled !== enabled) await restartRouterForLocalRoutes();
   } else {
     throw new Error(
       "Usage: control local-models list|inspect <tag-or-url>|install <tag-or-url> [--yes]|" +

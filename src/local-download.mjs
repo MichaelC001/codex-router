@@ -53,6 +53,10 @@ export async function downloadLocalModel(
     },
     capabilitiesFor,
     refreshCatalog = true,
+    restartService = async () => {
+      const { restartRouterServiceIfInstalled } = await import("./router-restart.mjs");
+      return restartRouterServiceIfInstalled();
+    },
     baseUrl = process.env.MODEL_ROUTER_LOCAL_BASE_URL || DEFAULT_LOCAL_VISION_BASE_URL,
     onProgress,
   } = {},
@@ -95,6 +99,8 @@ export async function downloadLocalModel(
       ? capabilitiesFor(tag)
       : (await import("./local-models.mjs")).localModelCapabilities(tag);
     const canChat = capabilities.includes("tools");
+    const { readLocalModelSelection } = await import("./local-models.mjs");
+    const wasEnabled = readLocalModelSelection().enabled.includes(tag);
     let adoptedVision = false;
     if (canChat) await enable(tag);
     if (!canChat && capabilities.includes("vision")) {
@@ -134,13 +140,23 @@ export async function downloadLocalModel(
         catalogError = "The model was downloaded, but the Codex catalog needs a refresh.";
       }
     }
+    let restartError;
+    if (canChat && !wasEnabled) {
+      try {
+        await restartService();
+      } catch (error) {
+        restartError = error instanceof Error ? error.message : String(error);
+      }
+    }
     writeLocalDownload({
       version: 1,
       tag,
       status: "done",
       detail: catalogError
         ? "ready · catalog refresh needed"
-        : canChat
+        : restartError
+          ? "ready · router restart needed"
+          : canChat
           ? "ready"
           : adoptedVision
             ? "ready for images"
@@ -149,11 +165,12 @@ export async function downloadLocalModel(
       startedAt,
       updatedAt: Date.now(),
       ...(catalogError ? { catalogError } : {}),
+      ...(restartError ? { restartError } : {}),
       capabilities,
       canChat,
       adoptedVision,
     });
-    return { tag, status: "done", catalogError, capabilities, canChat, adoptedVision };
+    return { tag, status: "done", catalogError, restartError, capabilities, canChat, adoptedVision };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     writeLocalDownload({

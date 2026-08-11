@@ -29,6 +29,7 @@ import {
   ollamaModelsPath,
 } from "./ollama-runtime.mjs";
 import { readLocalDownload } from "./local-download.mjs";
+import { EXPLORE_LOCAL_MODELS } from "./local-ollama-catalog.mjs";
 // The vision catalog is measured against a known image, so image readers are
 // taken from there rather than guessed at a second time here.
 import { LOCAL_VISION_CATALOG as VISION_CATALOG } from "./vision-host.mjs";
@@ -790,46 +791,12 @@ export const SUGGESTED_LOCAL_MODELS = Object.freeze(
   ].map((entry) => Object.freeze(entry)),
 );
 
-// A discoverable family list for the current Ollama library highlights. This
-// is intentionally separate from the coding shortlist: the registry template
-// is the authority for tool calling, and these families should not be offered
-// as Codex agents until `ollama show` proves that capability on the installed
-// tag. Any other tag remains installable through the URL/tag field.
-export const EXPLORE_LOCAL_MODELS = Object.freeze(
-  [
-    ["gemma4:e2b", 7.2, "Gemma 4 E2B"],
-    ["gemma4:e4b", 9.6, "Gemma 4 E4B"],
-    ["gemma4:12b", 7.6, "Gemma 4 12B"],
-    ["gemma4:26b", 18, "Gemma 4 26B"],
-    ["gemma4:31b", 19.9, "Gemma 4 31B"],
-    ["qwen3.5:0.8b", 1, "Qwen3.5 0.8B"],
-    ["qwen3.5:2b", 2.7, "Qwen3.5 2B"],
-    ["qwen3.5:4b", 3.4, "Qwen3.5 4B"],
-    ["qwen3.5:9b", 6.6, "Qwen3.5 9B"],
-    ["qwen3.5:27b", 17.4, "Qwen3.5 27B"],
-    ["qwen3.5:35b", 23.9, "Qwen3.5 35B"],
-    ["qwen3.5:122b", 81.4, "Qwen3.5 122B"],
-    ["qwen3.6:27b", 17.4, "Qwen3.6 27B"],
-    ["qwen3.6:35b", 23.9, "Qwen3.6 35B"],
-    ["nemotron-3-super:120b", 86.8, "Nemotron 3 Super 120B"],
-    ["nemotron3:33b", 27.6, "Nemotron 3 33B"],
-    ["ornith:9b", 5.6, "Ornith 9B"],
-    ["ornith:35b", 21.2, "Ornith 35B"],
-    ["muse-glimmer:latest", 18, "Muse Glimmer latest"],
-    ["muse-glimmer:30b", 18, "Muse Glimmer 30B"],
-    ["muse-glimmer:30b-mlx", 21, "Muse Glimmer 30B MLX"],
-  ].map(([tag, sizeGb, displayName]) =>
-    Object.freeze({
-      tag,
-      sizeGb,
-      tools: false,
-      context: undefined,
-      codex: "unverified",
-      displayName,
-      note: "Inspect Ollama capabilities before offering it to Codex.",
-    }),
-  ),
-);
+// A discoverable family/tag list captured from the official Ollama tag pages.
+// It is intentionally separate from the coding shortlist: the registry
+// template is the authority for tool calling, and these tags should not be
+// offered as Codex agents until `ollama show` proves that capability on the
+// installed tag. Any other tag remains installable through the URL/tag field.
+export { EXPLORE_LOCAL_MODELS };
 
 function notInstalled(installed) {
   const have = new Set(installed.map((entry) => String(entry?.tag ?? entry)));
@@ -907,8 +874,9 @@ export function suggestedExploreModels({
       ...entry,
       family: splitLocalModelTag(entry.tag).family,
       variant: splitLocalModelTag(entry.tag).variant,
-      fit: rateModelFit(entry.sizeGb, capacity),
-      diskFit: rateDiskFit(entry.sizeGb, capacity),
+      displayName: entry.displayName || localModelDisplayName(entry.tag),
+      fit: entry.downloadable === false ? "cloud-only" : rateModelFit(entry.sizeGb, capacity),
+      diskFit: entry.downloadable === false ? "cloud-only" : rateDiskFit(entry.sizeGb, capacity),
     }));
 }
 
@@ -981,9 +949,16 @@ export function renderLocalModels(snapshot) {
   if (explore.length) {
     lines.push(
       "",
-      "Explore more Ollama families (fit is shown; capabilities are checked after pull):",
-      `  ${explore.map((entry) => `${entry.tag} ${entry.fit === "too-large" ? "(won't fit)" : `(${entry.sizeGb} GB)`}`).join(" · ")}`,
+      "Explore Ollama tags (fit is shown; capabilities are checked after pull):",
     );
+    for (const entry of explore) {
+      if (entry.downloadable === false) {
+        lines.push(`  ${entry.tag.padEnd(42)} cloud only · not downloadable`);
+      } else {
+        const fit = entry.fit === "too-large" ? "won't fit" : entry.fit || "fit unknown";
+        lines.push(`  ${entry.tag.padEnd(42)} ${`${entry.sizeGb.toFixed(1)} GB`.padStart(8)} · ${fit}`);
+      }
+    }
   }
   if (coding.length || vision.length) {
     lines.push(

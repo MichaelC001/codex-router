@@ -22,13 +22,17 @@ The tray shows a persistent status card immediately—checking fit, preparing
 Ollama, pulling layers, and then ready or failed—so a long download never looks
 like a dead click.
 
-Any valid Ollama tag is supported; the suggestions are a curated starting
-list because Ollama's public registry exposes per-tag manifests rather than a
-stable exhaustive list-all endpoint. Family and variant metadata are shown in
-the **View more** panel. The router checks model size against available memory
-and disk before downloading. An installed model's generation speed is measured
-on demand with the **Speed** button and reported as tokens/second; unmeasured
-models never receive a guessed number.
+The **View more** panel includes the complete tag inventories captured from the
+official Ollama pages for Gemma 4, Qwen 3.5/3.6, Nemotron 3 Super, Ornith,
+Nemotron 3, and Muse Glimmer. That includes quantized, MLX, BF16, and other
+published variants—not only the family aliases. Cloud aliases are shown for
+completeness but are labelled **cloud only** and cannot be downloaded as local
+weights. The manifest is a dated snapshot, so arbitrary Ollama tags and model
+URLs remain supported even when a newly published tag has not been added yet.
+The router checks model size against available memory and disk before
+downloading. An installed model's generation speed is measured on demand with
+the **Speed** button and reported as tokens/second; unmeasured models never
+receive a guessed number.
 
 Useful commands:
 
@@ -41,6 +45,11 @@ Useful commands:
 ./bin/control local-models runtime start
 ./bin/control local-models runtime update --yes
 ```
+
+Checking or unchecking a model refreshes the picker and gateway routes and
+restarts the router service, so the newly published `local/...` route is served
+by the process already running in the background. Foreground/dev routers have
+no service to restart; restart them by hand after toggling.
 
 Updating Ollama is explicit. A normal model install reuses the installed
 runtime and does not replace it behind the user's back.

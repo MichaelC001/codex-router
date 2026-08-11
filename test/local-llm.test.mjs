@@ -117,6 +117,7 @@ test("local speed benchmark records Ollama eval tokens per second", async () => 
 
 test("a completed local pull checks tool-capable models on automatically", async () => {
   const enabled = [];
+  const restarts = [];
   const result = await downloadLocalModel("https://ollama.com/library/gemma4:12b", {
     ensureRuntime: async () => ({ running: true, managed: true }),
     pull: async (tag, { onProgress }) => {
@@ -125,10 +126,18 @@ test("a completed local pull checks tool-capable models on automatically", async
     },
     capabilitiesFor: () => ["completion", "tools"],
     enable: async (tag) => enabled.push(tag),
+    restartService: async () => {
+      restarts.push("restart");
+      return true;
+    },
     refreshCatalog: false,
   });
   assert.equal(result.status, "done");
   assert.deepEqual(enabled, ["gemma4:12b"]);
+  // The running router only loads user models at startup, so a newly checked
+  // local model must also restart the router or its first request falls
+  // through to the native backend.
+  assert.deepEqual(restarts, ["restart"]);
   assert.equal(readLocalDownload().detail, "ready");
 });
 

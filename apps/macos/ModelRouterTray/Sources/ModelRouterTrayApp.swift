@@ -1855,8 +1855,8 @@ struct LocalModelFamily: Decodable, Identifiable {
   var id: String { family }
 }
 
-/// A model worth downloading, already rated against this machine's memory by
-/// the router. Nothing that cannot run here reaches the tray.
+/// A model/tag worth displaying, already rated against this machine's memory
+/// by the router. Cloud aliases are intentionally visible but non-downloadable.
 struct AvailableLocalModel: Decodable, Identifiable, Equatable {
   let tag: String
   let family: String?
@@ -1873,6 +1873,7 @@ struct AvailableLocalModel: Decodable, Identifiable, Equatable {
   let fit: String
   let diskFit: String?
   let speedStatus: String?
+  let downloadable: Bool?
   var id: String { tag }
 
   var isVerified: Bool { codex == "verified" }
@@ -2689,6 +2690,13 @@ private struct TrayView: View {
             }
           }
         }
+        if let explore = localModels?.availableExplore, !explore.isEmpty {
+          let cloudCount = explore.filter { $0.downloadable == false }.count
+          Text("EXPLORE: \(explore.count) Ollama tags across \(localModels?.families?.count ?? 0) families\(cloudCount > 0 ? " · \(cloudCount) cloud-only" : "") · fit status in View more")
+            .font(.system(size: 8))
+            .foregroundStyle(routerMuted)
+            .lineLimit(2)
+        }
         Divider().padding(.vertical, 2)
         HStack(spacing: 6) {
           TextField("Tag or URL, e.g. gemma4:12b or ollama.com/library/gemma4:12b", text: $installTag)
@@ -2702,7 +2710,8 @@ private struct TrayView: View {
             .foregroundStyle(canInstall ? routerMint : routerMutedStrong)
             .disabled(!canInstall)
         }
-        Button(localDetailsExpanded ? "Hide details" : "View more") {
+        let exploreCount = localModels?.availableExplore?.count ?? 0
+        Button(localDetailsExpanded ? "Hide details" : (exploreCount > 0 ? "View more · \(exploreCount) tags" : "View more")) {
           withAnimation(.easeOut(duration: 0.15)) { localDetailsExpanded.toggle() }
         }
         .buttonStyle(.borderless)
@@ -2766,24 +2775,26 @@ private struct TrayView: View {
     }
 
     @ViewBuilder private func exploreLocalRow(_ model: AvailableLocalModel) -> some View {
+      let downloadable = model.downloadable != false
+      let tooLarge = model.fit == "too-large" || model.diskFit == "too-large"
       HStack(spacing: 5) {
         Text(model.displayName ?? model.tag)
           .font(.system(size: 8, weight: .medium))
           .lineLimit(1)
           .truncationMode(.tail)
         Spacer(minLength: 3)
-        Text(String(format: "%.1f GB", model.sizeGb))
+        Text(downloadable ? String(format: "%.1f GB", model.sizeGb) : "cloud")
           .font(.system(size: 8))
           .foregroundStyle(routerMuted)
           .monospacedDigit()
-        Text(model.fit == "too-large" || model.diskFit == "too-large" ? "won't fit" : model.fit)
+        Text(downloadable ? (tooLarge ? "won't fit" : model.fit) : "cloud only")
           .font(.system(size: 8))
-          .foregroundStyle(model.fit == "too-large" || model.diskFit == "too-large" ? routerRed : routerMutedStrong)
+          .foregroundStyle(!downloadable ? routerMuted : (tooLarge ? routerRed : routerMutedStrong))
         Button("Download") { Task { await store.downloadLocalModel(model.tag) } }
           .buttonStyle(.borderless)
           .font(.system(size: 8, weight: .medium))
-          .foregroundStyle(canDownloadLocalSuggestion && model.fit != "too-large" && model.diskFit != "too-large" ? routerMint : routerMutedStrong)
-          .disabled(!canDownloadLocalSuggestion || model.fit == "too-large" || model.diskFit == "too-large")
+          .foregroundStyle(canDownloadLocalSuggestion && downloadable && !tooLarge ? routerMint : routerMutedStrong)
+          .disabled(!canDownloadLocalSuggestion || !downloadable || tooLarge)
       }
     }
 
