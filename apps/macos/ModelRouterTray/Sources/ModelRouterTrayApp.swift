@@ -4,13 +4,16 @@ import Foundation
 import ServiceManagement
 import SwiftUI
 
-let routerAccent = Color(red: 0.36, green: 0.66, blue: 0.91)
-let routerMint = Color(red: 0.38, green: 0.82, blue: 0.61)
-let routerYellow = Color(red: 0.94, green: 0.68, blue: 0.25)
-let routerRed = Color(red: 0.91, green: 0.35, blue: 0.32)
+// Keep the existing material/background treatment, but use stronger text and
+// semantic accents so the compact tray remains readable over it.
+let routerAccent = Color(red: 0.12, green: 0.40, blue: 0.76)
+let routerMint = Color(red: 0.04, green: 0.52, blue: 0.31)
+let routerYellow = Color(red: 0.68, green: 0.40, blue: 0.03)
+let routerRed = Color(red: 0.72, green: 0.16, blue: 0.12)
 let routerInk = Color(red: 0.035, green: 0.043, blue: 0.055)
-let routerMuted = Color.secondary.opacity(0.72)
-let routerMutedStrong = Color.secondary.opacity(0.96)
+let routerText = Color.primary.opacity(0.92)
+let routerMuted = Color.primary.opacity(0.76)
+let routerMutedStrong = Color.primary.opacity(0.90)
 let removalArmWindow: TimeInterval = 4
 
 enum RouterActivityState: String, Decodable {
@@ -2099,13 +2102,13 @@ private struct StatusItemLabel: View {
       if store.hasConcurrentActivity {
         Text(store.compactActivityProvidersLabel)
           .font(.system(size: 10, weight: .medium, design: .rounded))
-          .foregroundStyle(.secondary)
+          .foregroundStyle(routerMuted)
           .lineLimit(1)
           .truncationMode(.tail)
       } else if let usage = store.selectedUsageText {
         Text(usage)
           .font(.system(size: 10, weight: .medium, design: .monospaced))
-          .foregroundStyle(.secondary)
+          .foregroundStyle(routerMuted)
           .lineLimit(1)
           .truncationMode(.tail)
       }
@@ -2179,7 +2182,7 @@ private struct TrayView: View {
       .padding(14)
     }
     .preferredColorScheme(.dark)
-    .foregroundStyle(.primary)
+    .foregroundStyle(routerText)
     .task { await store.refresh() }
   }
 
@@ -2354,7 +2357,7 @@ private struct TrayView: View {
           ? "Appears with Codex or ChatGPT, hides when they quit"
           : "Menu bar icon stays visible")
           .font(.system(size: 10))
-          .foregroundStyle(.secondary)
+          .foregroundStyle(routerMuted)
       }
       Spacer()
       Picker("", selection: Binding(
@@ -2378,7 +2381,7 @@ private struct TrayView: View {
           ? "Quotas and live activity pinned to the desktop"
           : "Show provider usage and activity status")
           .font(.system(size: 10))
-          .foregroundStyle(.secondary)
+          .foregroundStyle(routerMuted)
       }
       Spacer()
       Picker("", selection: Binding(
@@ -3670,7 +3673,7 @@ private struct TrayView: View {
     HStack {
       Text(title)
         .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(.secondary)
+        .foregroundStyle(routerMutedStrong)
       Spacer()
       Text(detail)
         .font(.system(size: 9, weight: .regular))
@@ -4526,7 +4529,7 @@ private struct AllProviderUsageCard: View {
 
   private var statusTint: Color {
     if card.providerID == "openai" || card.provider.isEnabled { return routerMint }
-    return Color.secondary.opacity(0.42)
+    return routerMuted
   }
 }
 
@@ -4539,7 +4542,7 @@ struct UsageRangePicker: View {
         Button(range.label) { selection = range }
           .buttonStyle(.plain)
           .font(.system(size: 9, weight: .medium))
-          .foregroundStyle(selection == range ? Color.primary : routerMuted)
+          .foregroundStyle(selection == range ? routerText : routerMuted)
           .padding(.horizontal, 7)
           .padding(.vertical, 4)
           .background(
@@ -4601,7 +4604,7 @@ struct UsageBarChart: View {
                 if shouldLabel(index: index) {
                   Text(axisLabel(for: point))
                     .font(.system(size: 7.5, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(routerMuted)
                     .fixedSize()
                     .position(
                       x: min(
@@ -4620,7 +4623,7 @@ struct UsageBarChart: View {
         if let point = hoveredPoint {
           Text(hoverText(for: point))
             .font(.system(size: 9, weight: .medium, design: .monospaced))
-            .foregroundStyle(.primary)
+            .foregroundStyle(routerText)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(.regularMaterial, in: Capsule())
