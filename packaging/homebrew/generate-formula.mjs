@@ -305,11 +305,12 @@ ${exclusionComment}${resourceBlocks}
 
     (bin/"codex-router").write <<~SH
       #!/bin/sh
+      source_root=$(CDPATH= cd -- "#{opt_libexec}" && pwd -P)
       export PATH="#{formula_opt_bin("node")}:$PATH"
-      export CODEX_ROUTER_SOURCE_ROOT="#{opt_libexec}"
+      export CODEX_ROUTER_SOURCE_ROOT="$source_root"
       export CODEX_ROUTER_NODE_BIN="#{formula_opt_bin("node")}/node"
       export CODEX_ROUTER_PACKAGE_MANAGER=homebrew
-      exec "#{opt_libexec}/bin/model-router" codex "$@"
+      exec "$source_root/bin/model-router" codex "$@"
     SH
   end
 
