@@ -110,6 +110,7 @@ final class RouterStore: ObservableObject {
   @Published private(set) var providerSetup: [String: ProviderSetupState] = [:]
   @Published private(set) var providerOperation: String?
   @Published private(set) var visionDownload: VisionDownloadState?
+  @Published private(set) var localDownload: VisionDownloadState?
   @Published private(set) var benchmarkingTag: String?
   @Published private(set) var maintenanceMessage: String?
   @Published private(set) var maintenanceSucceeded = false
@@ -664,6 +665,28 @@ final class RouterStore: ObservableObject {
     do {
       let output = try await runControl(arguments: ["--json"])
       snapshot = try JSONDecoder().decode(RouterSnapshot.self, from: output)
+      let reportedLocalDownload = snapshot.targets["codex"]?.modelSettings?.localModels?.download
+      // A click publishes an optimistic state before the control process has
+      // finished its registry/runtime preflight. Do not let a concurrent
+      // refresh replace that state with an older snapshot (or nil), otherwise
+      // the tray appears to do nothing for the first seconds of a pull.
+      if let current = localDownload, current.isRunning {
+        if let reported = reportedLocalDownload,
+          reported.tag == current.tag,
+          (reported.updatedAt ?? 0) >= (current.startedAt ?? .greatestFiniteMagnitude) {
+          localDownload = reported
+        }
+      } else if let current = localDownload, current.status == "error" {
+        // Keep a preflight failure visible until a newer record for that tag
+        // arrives; a nil/stale probe should not erase the explanation.
+        if let reported = reportedLocalDownload,
+          reported.tag == current.tag,
+          (reported.updatedAt ?? 0) >= (current.updatedAt ?? .greatestFiniteMagnitude) {
+          localDownload = reported
+        }
+      } else {
+        localDownload = reportedLocalDownload
+      }
       resolveInitialUsageProvider()
       lastUpdated = .now
       message = nil
@@ -1147,6 +1170,21 @@ final class RouterStore: ObservableObject {
     }
   }
 
+  /// Measures Ollama's own eval counters, so the number is this machine's
+  /// observed generation speed rather than a marketing estimate.
+  func benchmarkLocalModelSpeed(_ tag: String) async {
+    guard benchmarkingTag == nil else { return }
+    benchmarkingTag = tag
+    defer { benchmarkingTag = nil }
+    do {
+      _ = try await runControl(arguments: ["local-models", "benchmark", tag])
+      await refresh()
+      message = "\(tag) speed measured. Tokens per second is on its row."
+    } catch {
+      message = error.localizedDescription
+    }
+  }
+
   /// Downloads a local vision model with Ollama, then pins it. The tray row
   /// shows the size, so the click is the consent for the download.
   ///
@@ -1156,8 +1194,15 @@ final class RouterStore: ObservableObject {
   /// disabled meanwhile — the rest of the tray stays usable.
   func downloadLocalVisionModel(_ tag: String) async {
     guard visionDownload?.isRunning != true else { return }
+    let startedAt = Date().timeIntervalSince1970 * 1_000
     visionDownload = VisionDownloadState(
-      tag: tag, status: "downloading", detail: "starting", percent: 0, error: nil
+      tag: tag,
+      status: "downloading",
+      detail: "starting",
+      percent: 0,
+      error: nil,
+      startedAt: startedAt,
+      updatedAt: startedAt
     )
     do {
       _ = try await runControl(arguments: ["vision-bridge", "pull", tag])
@@ -1167,6 +1212,71 @@ final class RouterStore: ObservableObject {
       return
     }
     await pollVisionDownload()
+  }
+
+  /// Downloads a local chat model through Ollama, installs/starts Ollama when
+  /// needed, and checks the model on for Codex after the pull completes. The
+  /// control command returns immediately; the state file is polled so the
+  /// tray remains responsive during multi-gigabyte downloads.
+  func downloadLocalModel(_ tag: String) async {
+    guard localDownload?.isRunning != true else { return }
+    let startedAt = Date().timeIntervalSince1970 * 1_000
+    localDownload = VisionDownloadState(
+      tag: tag,
+      status: "downloading",
+      detail: "starting",
+      percent: 0,
+      error: nil,
+      startedAt: startedAt,
+      updatedAt: startedAt
+    )
+    do {
+      _ = try await runControl(arguments: ["local-models", "install", tag, "--yes"])
+    } catch {
+      message = error.localizedDescription
+      localDownload = VisionDownloadState(
+        tag: tag,
+        status: "error",
+        detail: "failed",
+        percent: 0,
+        error: error.localizedDescription,
+        startedAt: startedAt,
+        updatedAt: Date().timeIntervalSince1970 * 1_000
+      )
+      return
+    }
+    await pollLocalDownload()
+  }
+
+  func updateLocalOllama() async {
+    guard providerOperation == nil else { return }
+    providerOperation = "models"
+    defer { providerOperation = nil }
+    do {
+      _ = try await runControl(arguments: ["local-models", "runtime", "update", "--yes"])
+      await refresh()
+      message = "Ollama updated. Its headless server will be reused for local models."
+    } catch {
+      message = error.localizedDescription
+    }
+  }
+
+  private func pollLocalDownload() async {
+    while !Task.isCancelled {
+      try? await Task.sleep(nanoseconds: 1_000_000_000)
+      guard let data = try? await runControl(arguments: ["local-models", "list", "--json"]),
+        let decoded = try? JSONDecoder().decode(LocalModelsSnapshot.self, from: data)
+      else { continue }
+      let state = decoded.download
+      localDownload = state
+      guard let state else { continue }
+      if state.isRunning { continue }
+      await refresh()
+      message = state.status == "done"
+        ? "\(state.tag ?? "Model") ready for Codex. Restart Codex to refresh its picker."
+        : (state.error ?? "The local model download failed.")
+      return
+    }
   }
 
   private func pollVisionDownload() async {
@@ -1717,13 +1827,41 @@ struct LocalModelsSnapshot: Decodable {
   // older router that has no suggestions to offer.
   let available: [AvailableLocalModel]?
   let availableVision: [AvailableVisionModel]?
+  let availableExplore: [AvailableLocalModel]?
   let machine: String?
+  let families: [LocalModelFamily]?
+  let download: VisionDownloadState?
+  let runtime: LocalRuntimeSnapshot?
+  let catalog: LocalCatalogSnapshot?
+}
+
+struct LocalRuntimeSnapshot: Decodable {
+  let installed: Bool?
+  let version: String?
+  let running: Bool?
+  let managed: Bool?
+  let modelsPath: String?
+}
+
+struct LocalCatalogSnapshot: Decodable {
+  let mode: String?
+  let note: String?
+}
+
+struct LocalModelFamily: Decodable, Identifiable {
+  let family: String
+  let displayName: String
+  let variants: [String]
+  var id: String { family }
 }
 
 /// A model worth downloading, already rated against this machine's memory by
 /// the router. Nothing that cannot run here reaches the tray.
 struct AvailableLocalModel: Decodable, Identifiable, Equatable {
   let tag: String
+  let family: String?
+  let variant: String?
+  let displayName: String?
   let sizeGb: Double
   let tools: Bool
   let context: Int?
@@ -1733,6 +1871,8 @@ struct AvailableLocalModel: Decodable, Identifiable, Equatable {
   let codex: String?
   let note: String
   let fit: String
+  let diskFit: String?
+  let speedStatus: String?
   var id: String { tag }
 
   var isVerified: Bool { codex == "verified" }
@@ -1746,11 +1886,14 @@ struct AvailableVisionModel: Decodable, Identifiable, Equatable {
   let accuracy: String
   let note: String
   let fit: String
+  let diskFit: String?
   var id: String { tag }
 }
 
 struct InstalledLocalModel: Decodable, Identifiable, Equatable {
   let tag: String
+  let family: String?
+  let variant: String?
   let sizeGb: Double
   let modified: String?
   let enabled: Bool
@@ -1759,6 +1902,8 @@ struct InstalledLocalModel: Decodable, Identifiable, Equatable {
   let tools: Bool?
   let accuracy: String?
   let agent: String?
+  let tokensPerSecond: Double?
+  let speedStatus: String?
   var id: String { tag }
 
   /// Codex drives every turn through tool calls, so a model without them
@@ -1820,6 +1965,10 @@ struct VisionDownloadState: Decodable, Equatable {
   let detail: String?
   let percent: Int?
   let error: String?
+  // These timestamps let the tray reject an older terminal record when the
+  // operator retries the same tag while a refresh is in flight.
+  let startedAt: Double?
+  let updatedAt: Double?
 
   var isRunning: Bool { status == "downloading" }
 }
@@ -2304,6 +2453,7 @@ private struct TrayView: View {
     @State private var pickerExpanded = true
     @State private var visionExpanded = true
     @State private var localLlmExpanded = false
+    @State private var localDetailsExpanded = false
     @State private var installTag = ""
     @State private var armedRemoval: String?
     @State private var collapsedProviders = Set<String>()
@@ -2491,8 +2641,11 @@ private struct TrayView: View {
         Text("Models on this Mac, through Ollama. Check one to offer it to Codex as a chat model.")
           .font(.system(size: 9))
           .foregroundStyle(routerMuted)
+        if let download = store.localDownload {
+          localDownloadStatus(download)
+        }
         if sortedLocalModels.isEmpty {
-          Text("Nothing installed yet. Pick one below to download, or type any tag.")
+          Text("Nothing installed yet. Pick one below, or paste any Ollama model URL/tag.")
             .font(.system(size: 9))
             .foregroundStyle(routerMutedStrong)
         } else {
@@ -2538,10 +2691,10 @@ private struct TrayView: View {
         }
         Divider().padding(.vertical, 2)
         HStack(spacing: 6) {
-          TextField("Tag, e.g. gemma3:4b or hf.co/user/repo:Q4_K_M", text: $installTag)
+          TextField("Tag or URL, e.g. gemma4:12b or ollama.com/library/gemma4:12b", text: $installTag)
             .textFieldStyle(.roundedBorder)
             .font(.system(size: 10))
-            .disabled(busy || store.visionDownload?.isRunning == true)
+            .disabled(busy || store.localDownload?.isRunning == true)
             .onSubmit { submitInstall() }
           Button("Install") { submitInstall() }
             .buttonStyle(.borderless)
@@ -2549,13 +2702,88 @@ private struct TrayView: View {
             .foregroundStyle(canInstall ? routerMint : routerMutedStrong)
             .disabled(!canInstall)
         }
-        // Only for a tag that is not on the list yet -- an install already in
-        // the list reports its own progress on its row.
-        if let download = store.visionDownload,
-          download.isRunning,
-          !sortedLocalModels.contains(where: { $0.tag == download.tag }) {
-          downloadBar(tag: download.tag, percent: download.percent)
+        Button(localDetailsExpanded ? "Hide details" : "View more") {
+          withAnimation(.easeOut(duration: 0.15)) { localDetailsExpanded.toggle() }
         }
+        .buttonStyle(.borderless)
+        .font(.system(size: 9, weight: .medium))
+        .foregroundStyle(routerMutedStrong)
+        if localDetailsExpanded {
+          localDetails
+        }
+      }
+    }
+
+    @ViewBuilder private var localDetails: some View {
+      VStack(alignment: .leading, spacing: 4) {
+        if let machine = localModels?.machine {
+          Text(machine)
+            .font(.system(size: 8))
+            .foregroundStyle(routerMuted)
+        }
+        if let runtime = localModels?.runtime {
+          let runtimeLabel = runtime.installed == true
+            ? "Ollama \(runtime.version ?? "installed")"
+            : "Ollama not installed"
+          Text("\(runtimeLabel) · headless server \(runtime.running == true ? "managed" : "not started")")
+            .font(.system(size: 8))
+            .foregroundStyle(runtime.installed == true ? routerMint : routerYellow)
+          if let modelsPath = runtime.modelsPath {
+            Text("Models: \(modelsPath)")
+              .font(.system(size: 8))
+              .foregroundStyle(routerMuted)
+              .lineLimit(1)
+              .truncationMode(.middle)
+          }
+          if runtime.installed == true {
+            Button("Update Ollama") { Task { await store.updateLocalOllama() } }
+              .buttonStyle(.borderless)
+              .font(.system(size: 8, weight: .medium))
+              .foregroundStyle(routerMutedStrong)
+              .disabled(busy)
+          }
+        }
+        if let families = localModels?.families, !families.isEmpty {
+          Text("Families: \(families.map { "\($0.family) (\($0.variants.joined(separator: ", ")))" }.joined(separator: " · "))")
+            .font(.system(size: 8))
+            .foregroundStyle(routerMuted)
+            .lineLimit(3)
+        }
+        Text("Speed is measured after install with Ollama's eval counters; unmeasured models show no invented number.")
+          .font(.system(size: 8))
+          .foregroundStyle(routerMuted)
+        if let explore = localModels?.availableExplore, !explore.isEmpty {
+          Divider().padding(.vertical, 2)
+          Text("EXPLORE OLLAMA FAMILIES")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(routerMuted)
+          ForEach(explore) { model in
+            exploreLocalRow(model)
+          }
+        }
+      }
+      .padding(.horizontal, 2)
+    }
+
+    @ViewBuilder private func exploreLocalRow(_ model: AvailableLocalModel) -> some View {
+      HStack(spacing: 5) {
+        Text(model.displayName ?? model.tag)
+          .font(.system(size: 8, weight: .medium))
+          .lineLimit(1)
+          .truncationMode(.tail)
+        Spacer(minLength: 3)
+        Text(String(format: "%.1f GB", model.sizeGb))
+          .font(.system(size: 8))
+          .foregroundStyle(routerMuted)
+          .monospacedDigit()
+        Text(model.fit == "too-large" || model.diskFit == "too-large" ? "won't fit" : model.fit)
+          .font(.system(size: 8))
+          .foregroundStyle(model.fit == "too-large" || model.diskFit == "too-large" ? routerRed : routerMutedStrong)
+        Button("Download") { Task { await store.downloadLocalModel(model.tag) } }
+          .buttonStyle(.borderless)
+          .font(.system(size: 8, weight: .medium))
+          .foregroundStyle(canDownloadLocalSuggestion && model.fit != "too-large" && model.diskFit != "too-large" ? routerMint : routerMutedStrong)
+          .disabled(!canDownloadLocalSuggestion || model.fit == "too-large" || model.diskFit == "too-large")
       }
     }
 
@@ -2586,12 +2814,12 @@ private struct TrayView: View {
           .foregroundStyle(routerMuted)
           .monospacedDigit()
         Button("Download") {
-          Task { await store.downloadLocalVisionModel(model.tag) }
+          Task { await store.downloadLocalModel(model.tag) }
         }
         .buttonStyle(.borderless)
         .font(.system(size: 9, weight: .medium))
-        .foregroundStyle(canDownloadSuggestion ? routerMint : routerMutedStrong)
-        .disabled(!canDownloadSuggestion)
+        .foregroundStyle(canDownloadLocalSuggestion ? routerMint : routerMutedStrong)
+        .disabled(!canDownloadLocalSuggestion)
       }
     }
 
@@ -2624,17 +2852,17 @@ private struct TrayView: View {
           .foregroundStyle(routerMuted)
           .monospacedDigit()
         Button("Download") {
-          Task { await store.downloadLocalVisionModel(model.tag) }
+          Task { await store.downloadLocalModel(model.tag) }
         }
         .buttonStyle(.borderless)
         .font(.system(size: 9, weight: .medium))
-        .foregroundStyle(canDownloadSuggestion ? routerMint : routerMutedStrong)
-        .disabled(!canDownloadSuggestion)
+        .foregroundStyle(canDownloadLocalSuggestion ? routerMint : routerMutedStrong)
+        .disabled(!canDownloadLocalSuggestion)
       }
     }
 
-    private var canDownloadSuggestion: Bool {
-      !busy && store.visionDownload?.isRunning != true
+    private var canDownloadLocalSuggestion: Bool {
+      !busy && store.localDownload?.isRunning != true
     }
 
     private var suggestedLocalModels: [AvailableLocalModel] {
@@ -2646,6 +2874,48 @@ private struct TrayView: View {
     }
 
     private static let checkColumnWidth: CGFloat = 38
+
+    @ViewBuilder private func localDownloadStatus(_ download: VisionDownloadState) -> some View {
+      let isDone = download.status == "done"
+      let isError = download.status == "error"
+      let tint = isError ? routerRed : (isDone ? routerMint : routerYellow)
+      VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 6) {
+          Circle()
+            .fill(tint)
+            .frame(width: 6, height: 6)
+          Text(isError ? "Local model download failed" : (isDone ? "Local model ready" : "Downloading local model"))
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(tint)
+          Spacer(minLength: 4)
+          if let percent = download.percent, !isError {
+            Text("\(percent)%")
+              .font(.system(size: 9, weight: .medium))
+              .foregroundStyle(routerMutedStrong)
+              .monospacedDigit()
+          }
+        }
+        if let tag = download.tag {
+          Text(tag)
+            .font(.system(size: 9, weight: .medium))
+            .lineLimit(1)
+            .truncationMode(.middle)
+        }
+        if let detail = download.error ?? download.detail, !detail.isEmpty {
+          Text(detail)
+            .font(.system(size: 8))
+            .foregroundStyle(isError ? routerRed : routerMuted)
+            .lineLimit(2)
+        }
+        if download.isRunning {
+          ProgressView(value: Double(download.percent ?? 0), total: 100)
+            .progressViewStyle(.linear)
+            .tint(routerMint)
+        }
+      }
+      .padding(7)
+      .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
 
     @ViewBuilder private func downloadBar(tag: String?, percent: Int?) -> some View {
       HStack(spacing: 6) {
@@ -2691,7 +2961,7 @@ private struct TrayView: View {
               .foregroundStyle(routerMutedStrong)
               .layoutPriority(1)
           }
-          if let download = store.visionDownload,
+          if let download = store.localDownload,
             download.isRunning,
             download.tag == model.tag {
             downloadBar(tag: nil, percent: download.percent)
@@ -2718,6 +2988,14 @@ private struct TrayView: View {
           Text("· \(accuracy)")
             .foregroundStyle(accuracy == "accurate" ? routerMint : routerRed)
         }
+        if let speed = model.tokensPerSecond {
+          Text("· \(String(format: "%.1f", speed)) tok/s")
+            .foregroundStyle(routerMutedStrong)
+            .monospacedDigit()
+        } else {
+          Text("· speed unmeasured")
+            .foregroundStyle(routerMuted)
+        }
       }
       .font(.system(size: 9))
       .lineLimit(1)
@@ -2735,6 +3013,17 @@ private struct TrayView: View {
 
     @ViewBuilder private func rowActions(_ model: InstalledLocalModel) -> some View {
       HStack(spacing: 8) {
+        if store.benchmarkingTag == model.tag {
+          Text("testing…")
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(routerYellow)
+        } else {
+          Button("Speed") { Task { await store.benchmarkLocalModelSpeed(model.tag) } }
+            .buttonStyle(.borderless)
+            .font(.system(size: 9))
+            .foregroundStyle(routerMutedStrong)
+            .disabled(busy || store.benchmarkingTag != nil)
+        }
         // The vision role is chosen per model, independently of whether the
         // model is offered to Codex as a chat model: the best image reader
         // here cannot call tools, and the best agent cannot see.
@@ -2811,13 +3100,21 @@ private struct TrayView: View {
     }
 
     private var localLlmSummary: String {
+      if let download = store.localDownload, download.isRunning {
+        let tag = download.tag ?? "local model"
+        let percent = download.percent.map { " · \($0)%" } ?? ""
+        return "Downloading \(tag)\(percent)"
+      }
+      if let download = store.localDownload, download.status == "error" {
+        return "Last download failed"
+      }
       guard let localModels, localModels.installed > 0 else { return "none installed" }
       let chat = localModels.usableAsChat ?? 0
       return "\(localModels.installed) installed · \(chat) for Codex · \(String(format: "%.1f", localModels.totalGb)) GB"
     }
 
     private var canInstall: Bool {
-      !busy && store.visionDownload?.isRunning != true
+      !busy && store.localDownload?.isRunning != true
         && !installTag.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
@@ -2825,7 +3122,7 @@ private struct TrayView: View {
       let tag = installTag.trimmingCharacters(in: .whitespaces)
       guard canInstall else { return }
       installTag = ""
-      Task { await store.downloadLocalVisionModel(tag) }
+      Task { await store.downloadLocalModel(tag) }
     }
 
     // Lets a text-only model (DeepSeek, GLM, ...) answer about a pasted image by

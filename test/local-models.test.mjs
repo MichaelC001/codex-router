@@ -25,6 +25,7 @@ const {
   renderLocalModels,
   setLocalModelEnabled,
   suggestedLocalModels,
+  suggestedExploreModels,
   suggestedVisionModels,
 } = await import("../src/local-models.mjs");
 
@@ -340,6 +341,24 @@ test("coding models are separated from image readers", () => {
   // The smallest reader scored zero on text, so size must not float it up.
   assert.notEqual(vision[0].tag, "moondream");
   assert.ok(vision.at(-1).accuracy === "captions-only");
+});
+
+test("the explore catalog groups the requested Ollama families and keeps fit visible", () => {
+  const entries = suggestedExploreModels({
+    capacity: machineCapacity({ totalMemoryBytes: 16e9, unifiedMemory: true }),
+  });
+  const tags = new Set(entries.map((entry) => entry.tag));
+  for (const tag of [
+    "gemma4:12b",
+    "qwen3.5:9b",
+    "qwen3.6:27b",
+    "nemotron-3-super:120b",
+    "ornith:9b",
+    "nemotron3:33b",
+    "muse-glimmer:30b",
+  ]) assert.ok(tags.has(tag), tag);
+  assert.equal(entries.find((entry) => entry.tag === "nemotron-3-super:120b").fit, "too-large");
+  assert.equal(entries.find((entry) => entry.tag === "gemma4:12b").tools, false);
 });
 
 // A GGUF header built by hand, so the parser is tested without the network and
