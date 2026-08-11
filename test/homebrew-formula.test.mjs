@@ -154,7 +154,7 @@ test("the generated formula owns upgrades and preserves one-time setup", () => {
   assert.match(formula, /manifest\.dig\("current", "packageManager"\) != "homebrew"/);
   assert.match(formula, /codex-router setup --guided/);
   assert.match(formula, /codex-router uninstall/);
-  assert.match(formula, /codex-router --version/);
+  assert.match(formula, /codex-router providers list --json/);
   assert.match(formula, /resource "litellm" do/);
   assert.match(formula, /pyroscope-io==0\.8\.16/);
 });

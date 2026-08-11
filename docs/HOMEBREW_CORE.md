@@ -22,8 +22,9 @@ application form: the submission is a pull request adding
   packaging/homebrew/check-core-readiness.sh
   ```
 
-- Run a clean source installation on both macOS and Linux. The CI workflow's
-  manual `workflow_dispatch` path packages the selected commit and runs:
+- After the release workflow regenerates the checked-in formula, run a clean
+  source installation on both macOS and Linux. The CI workflow's manual
+  `workflow_dispatch` path runs:
 
   ```sh
   packaging/homebrew/check-core-readiness.sh --install

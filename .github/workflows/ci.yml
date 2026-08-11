@@ -107,25 +107,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
       - name: Set up Homebrew
         uses: Homebrew/actions/setup-homebrew@b35a29a0f83ee8b8ca07b219fc8db3d7bb88ab49 # 2026.08.10.2
-      - name: Generate formula for this commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          version=$(node -p 'require("./package.json").version')
-          archive="$RUNNER_TEMP/codex-router-$version.tar.gz"
-          git archive --format=tar.gz --prefix="codex-router-$version/" -o "$archive" HEAD
-          sha=$(shasum -a 256 "$archive" | awk '{ print $1 }')
-          node packaging/homebrew/generate-formula.mjs \
-            --version "$version" \
-            --source-url "file://$archive" \
-            --source-sha256 "$sha" \
-            --allow-local-source \
-            --output Formula/codex-router.rb
       - name: Build and test the formula from source
         run: packaging/homebrew/check-core-readiness.sh --install
 

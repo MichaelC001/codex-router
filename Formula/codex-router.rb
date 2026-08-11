@@ -633,7 +633,9 @@ class CodexRouter < Formula
   end
 
   test do
-    assert_match version.to_s, shell_output("#{bin}/codex-router --version")
+    output = shell_output("#{bin}/codex-router providers list --json")
+    assert_match '"providers":', output
+    assert_match '"anthropic-api"', output
     system formula_opt_bin("node")/"node", "--input-type=module", "--eval",
            "import('#{libexec}/node_modules/proper-lockfile/index.js')"
     system libexec/".venv/bin/python", "-c", "import fastapi, litellm"
