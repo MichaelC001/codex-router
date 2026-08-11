@@ -144,12 +144,17 @@ test("the generated formula owns upgrades and preserves one-time setup", () => {
     excludedResources: [{ name: "pyroscope-io", version: "0.8.16" }],
   });
   assert.match(formula, /class CodexRouter < Formula/);
+  assert.doesNotMatch(formula, /^\s*version\s+/m);
+  assert.match(formula, /depends_on "libyaml"/);
+  assert.match(formula, /if OS\.mac\?/);
+  assert.doesNotMatch(formula, /Formula\["node"\]\.opt_bin/);
   assert.match(formula, /CODEX_ROUTER_SOURCE_ROOT/);
   assert.match(formula, /CODEX_ROUTER_PACKAGE_MANAGER=homebrew/);
   assert.match(formula, /exec .*model-router.* codex "\$@"/);
-  assert.match(formula, /manifest\.dig\("current", "packageManager"\) == "homebrew"/);
+  assert.match(formula, /manifest\.dig\("current", "packageManager"\) != "homebrew"/);
   assert.match(formula, /codex-router setup --guided/);
   assert.match(formula, /codex-router uninstall/);
+  assert.match(formula, /codex-router --version/);
   assert.match(formula, /resource "litellm" do/);
   assert.match(formula, /pyroscope-io==0\.8\.16/);
 });
