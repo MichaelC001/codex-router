@@ -1196,9 +1196,17 @@ final class RouterStore: ObservableObject {
   /// so the tray arms the row before this is reachable.
   func uninstallLocalModel(_ tag: String) async {
     guard providerOperation == nil, localModelOperation == nil else { return }
+    let startedAt = Date()
     localModelOperation = LocalModelOperation(tag: tag, kind: .uninstall)
-    defer { localModelOperation = nil }
     await applyModelSettings(arguments: ["local-models", "uninstall", tag, "--yes"])
+    // A local delete can complete before SwiftUI presents the next frame, and
+    // refresh removes the model row that used to own the only progress UI.
+    // Keep the operation banner around long enough to be perceived.
+    let remaining = 0.8 - Date().timeIntervalSince(startedAt)
+    if remaining > 0 {
+      try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+    }
+    localModelOperation = nil
   }
 
   /// Switches the reader to an already-installed local model.
@@ -2775,6 +2783,10 @@ private struct TrayView: View {
         Text("Run models locally through Ollama. Enable an installed model to make it available to Codex.")
           .font(.system(size: 9))
           .foregroundStyle(routerMuted)
+        if let operation = store.localModelOperation {
+          localModelOperationStatus(operation)
+            .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+        }
         if let download = store.localDownload {
           localDownloadStatus(download)
         }
@@ -2794,6 +2806,34 @@ private struct TrayView: View {
           localDetails
         }
       }
+      .animation(.easeOut(duration: 0.2), value: store.localModelOperation)
+    }
+
+    @ViewBuilder private func localModelOperationStatus(_ operation: LocalModelOperation) -> some View {
+      HStack(spacing: 9) {
+        OperationPulse(tint: routerRed)
+        VStack(alignment: .leading, spacing: 2) {
+          Text("\(operation.kind.label) local model")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(routerRed)
+          Text(operation.tag)
+            .font(.system(size: 9, weight: .medium, design: .monospaced))
+            .foregroundStyle(routerMutedStrong)
+            .lineLimit(1)
+            .truncationMode(.middle)
+        }
+        Spacer(minLength: 4)
+        ProgressView()
+          .controlSize(.small)
+          .tint(routerRed)
+      }
+      .padding(8)
+      .background(
+        routerRed.opacity(0.08),
+        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+      )
+      .accessibilityElement(children: .combine)
+      .accessibilityLabel("\(operation.kind.label) local model \(operation.tag)")
     }
 
     @ViewBuilder private var localInstalledSection: some View {
