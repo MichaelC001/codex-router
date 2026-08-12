@@ -312,7 +312,7 @@ test("the listing renders for a person, not only for the tray", () => {
   assert.match(rendered, /For reading images only — cannot code:/);
   assert.match(rendered, /Explore Ollama tags/);
   assert.match(rendered, /qwen3\.5:cloud\s+cloud only · not downloadable/);
-  assert.match(rendered, /control local-models install /);
+  assert.match(rendered, /control local-models install .* --yes/);
 });
 
 test("an empty machine reads as empty rather than as a broken table", () => {

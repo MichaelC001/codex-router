@@ -619,7 +619,7 @@ want, then fully quit and reopen Codex.
 
 ```sh
 ./bin/control local-models list                  # installed, plus what to download
-./bin/control local-models install llama3.2:3b   # download, with progress
+./bin/control local-models install llama3.2:3b --yes # download, with progress
 ./bin/control local-models set llama3.2:3b on    # publish it to Codex
 ./bin/control local-models uninstall llava --yes # delete it from disk
 ```

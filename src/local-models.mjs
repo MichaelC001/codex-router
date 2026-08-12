@@ -973,7 +973,7 @@ export function renderLocalModels(snapshot) {
   if (coding.length || vision.length) {
     lines.push(
       "",
-      `  ./bin/control local-models install ${(coding[0] || vision[0]).tag}`,
+      `  ./bin/control local-models install ${(coding[0] || vision[0]).tag} --yes`,
       "  Any valid Ollama tag or ollama.com model URL also works.",
     );
   }

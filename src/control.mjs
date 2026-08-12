@@ -1118,6 +1118,7 @@ async function handleLocalModels(action, value, flag) {
       percent: 0,
       startedAt,
       updatedAt: Date.now(),
+      workerPid: process.pid,
       ...extra,
     });
     // Persist the optimistic state before any network lookup or runtime
@@ -1147,11 +1148,23 @@ async function handleLocalModels(action, value, flag) {
       // from the tray so no GUI window is involved.
       await ensureOllamaHeadless({ install: flag === "--yes" });
       writePhase("Starting model download");
-      spawn(process.execPath, [path.join(REPO_ROOT, "src", "local-download.mjs"), tag], {
+      const child = spawn(process.execPath, [path.join(REPO_ROOT, "src", "local-download.mjs"), tag], {
         detached: true,
         stdio: "ignore",
         windowsHide: true,
-      }).unref();
+      });
+      child.unref();
+      writeLocalDownload({
+        ...readLocalDownload(),
+        version: 1,
+        tag,
+        status: "downloading",
+        detail: "Starting model download",
+        percent: 0,
+        startedAt,
+        updatedAt: Date.now(),
+        workerPid: child.pid,
+      });
       // Advisory, never blocking: the operator may well want a vision-only
       // model, but they should know before the gigabytes land.
       process.stdout.write(

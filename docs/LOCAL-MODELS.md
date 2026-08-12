@@ -15,8 +15,9 @@ https://ollama.com/library/gemma4:12b
 The click starts `ollama serve` detached from the UI. If the Ollama CLI is
 missing, the router runs the official installer only as part of that explicit
 install action (`brew install ollama` when Homebrew is available; otherwise the
-official installer with `OLLAMA_NO_START=1` on macOS/Linux, or WinGet on
-Windows). It never opens the Ollama chat window. A pull completes in the
+official installer with `OLLAMA_NO_START=1` and native administrator
+authorization on macOS, PolicyKit or an interactive terminal on Linux, or
+WinGet on Windows). It never opens the Ollama chat window. A pull completes in the
 background, then a tool-capable model is checked on and published to Codex.
 The tray shows a persistent status card immediately—checking fit, preparing
 Ollama, pulling layers, and then ready or failed—so a long download never looks

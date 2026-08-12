@@ -20,11 +20,52 @@ export const LOCAL_DOWNLOAD_STATE_PATH =
   process.env.MODEL_ROUTER_LOCAL_DOWNLOAD_STATE ||
   path.join(STATE_DIR, "local-model-download.json");
 
-export function readLocalDownload() {
+export const LOCAL_DOWNLOAD_HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1_000;
+
+function processIsAlive(pid, kill = process.kill) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+export function reconcileLocalDownload(
+  state,
+  {
+    now = Date.now(),
+    kill = process.kill,
+    timeoutMs = LOCAL_DOWNLOAD_HEARTBEAT_TIMEOUT_MS,
+    persist = true,
+  } = {},
+) {
+  if (!state || state.status !== "downloading") return state;
+  const updatedAt = Number(state.updatedAt || state.startedAt || 0);
+  const heartbeatFresh = Number.isFinite(updatedAt) && now - updatedAt <= timeoutMs;
+  const workerAlive = processIsAlive(Number(state.workerPid), kill);
+  // Older state files have no workerPid. Give a just-started preflight one
+  // heartbeat window, but never let an abandoned record block installs forever.
+  if ((state.workerPid && workerAlive && heartbeatFresh) || (!state.workerPid && heartbeatFresh)) {
+    return state;
+  }
+  const recovered = {
+    ...state,
+    status: "error",
+    detail: "interrupted",
+    error: "The local model download stopped before completion. Retry the install.",
+    updatedAt: now,
+  };
+  if (persist) writeLocalDownload(recovered);
+  return recovered;
+}
+
+export function readLocalDownload(options) {
   if (!existsSync(LOCAL_DOWNLOAD_STATE_PATH)) return null;
   try {
     const parsed = JSON.parse(readFileSync(LOCAL_DOWNLOAD_STATE_PATH, "utf8"));
-    return parsed?.version === 1 ? parsed : null;
+    return parsed?.version === 1 ? reconcileLocalDownload(parsed, options) : null;
   } catch {
     return null;
   }
@@ -71,6 +112,7 @@ export async function downloadLocalModel(
     percent: 0,
     startedAt,
     updatedAt: startedAt,
+    workerPid: process.pid,
   });
   let lastPercent = -1;
   let lastDetail = "";
@@ -91,6 +133,7 @@ export async function downloadLocalModel(
           percent: shown < 0 ? 0 : shown,
           startedAt,
           updatedAt: Date.now(),
+          workerPid: process.pid,
         });
         onProgress?.({ detail, percent: shown < 0 ? 0 : shown });
       },
@@ -164,6 +207,7 @@ export async function downloadLocalModel(
       percent: 100,
       startedAt,
       updatedAt: Date.now(),
+      workerPid: process.pid,
       ...(catalogError ? { catalogError } : {}),
       ...(restartError ? { restartError } : {}),
       capabilities,
@@ -182,6 +226,7 @@ export async function downloadLocalModel(
       error: message,
       startedAt,
       updatedAt: Date.now(),
+      workerPid: process.pid,
     });
     throw error;
   }

@@ -16,13 +16,19 @@ const { localModelDisplayName, normalizeLocalModelTag, splitLocalModelTag } =
   await import("../src/local-model-ref.mjs");
 const {
   ensureOllamaHeadless,
+  localOllamaRuntimeSnapshot,
   ollamaHostForUrl,
   ollamaInstallPlan,
+  ollamaUpdatePlan,
   parseOllamaVersion,
   probeOllama,
 } = await import("../src/ollama-runtime.mjs");
 const { benchmarkLocalModel, readLocalBenchmarks } = await import("../src/local-benchmark.mjs");
-const { downloadLocalModel, readLocalDownload } = await import("../src/local-download.mjs");
+const {
+  downloadLocalModel,
+  readLocalDownload,
+  reconcileLocalDownload,
+} = await import("../src/local-download.mjs");
 const {
   readVisionBridgeSettings,
   setVisionBridgeEnabled,
@@ -65,7 +71,181 @@ test("runtime helpers keep Ollama headless and expose safe install plans", () =>
     "install",
     "ollama",
   ]);
-  assert.equal(ollamaInstallPlan({ platform: "linux", spawn: fakeSpawn }).command, "sh");
+  assert.equal(
+    ollamaInstallPlan({ platform: "linux", spawn: fakeSpawn, interactive: true }).command,
+    "sh",
+  );
+  assert.equal(
+    ollamaInstallPlan({ platform: "linux", spawn: fakeSpawn, interactive: false }).command,
+    undefined,
+  );
+  const policyKitSpawn = (command, args) => {
+    if (command === "pkexec" && args[0] === "--version") return { status: 0 };
+    return fakeSpawn(command, args);
+  };
+  assert.equal(
+    ollamaInstallPlan({ platform: "linux", spawn: policyKitSpawn, interactive: false }).command,
+    "pkexec",
+  );
+  const noPackageManager = () => ({ status: 1 });
+  assert.equal(
+    ollamaInstallPlan({ platform: "darwin", spawn: noPackageManager, interactive: false }).command,
+    "/usr/bin/osascript",
+  );
+});
+
+test("runtime updates use Homebrew only when it owns the Ollama formula", () => {
+  const officialSpawn = (command, args) => {
+    if (command === "ollama" && args[0] === "--version") return { status: 0 };
+    if (command === "brew" && args[0] === "--version") return { status: 0 };
+    if (command === "brew" && args[0] === "list") return { status: 1 };
+    return { status: 1 };
+  };
+  assert.equal(
+    ollamaUpdatePlan({
+      platform: "darwin",
+      spawn: officialSpawn,
+      interactive: false,
+      resolveCommand: () => "/Applications/Ollama.app/Contents/Resources/ollama",
+    }).source,
+    "official-app",
+  );
+  assert.equal(
+    ollamaUpdatePlan({
+      platform: "darwin",
+      spawn: officialSpawn,
+      interactive: false,
+      resolveCommand: () => "/Applications/Ollama.app/Contents/Resources/ollama",
+    }).command,
+    "/usr/bin/osascript",
+  );
+  const homebrewSpawn = (command, args) => {
+    if (command === "ollama" && args[0] === "--version") return { status: 0 };
+    if (command === "brew" && args[0] === "--version") return { status: 0 };
+    if (command === "brew" && args[0] === "list") return { status: 0 };
+    return { status: 1 };
+  };
+  assert.equal(
+    ollamaUpdatePlan({
+      platform: "darwin",
+      spawn: homebrewSpawn,
+      resolveCommand: () => "/opt/homebrew/Cellar/ollama/0.32.6/bin/ollama",
+    }).source,
+    "homebrew",
+  );
+  const caskSpawn = (command, args) => {
+    if (command === "ollama" && args[0] === "--version") return { status: 0 };
+    if (command === "brew" && args[0] === "--version") return { status: 0 };
+    if (command === "brew" && args[0] === "list" && args[1] === "--cask") {
+      return { status: 0 };
+    }
+    return { status: 1 };
+  };
+  assert.deepEqual(
+    ollamaUpdatePlan({
+      platform: "darwin",
+      spawn: caskSpawn,
+      resolveCommand: () => "/Applications/Ollama.app/Contents/Resources/ollama",
+    }),
+    {
+      command: "brew",
+      args: ["upgrade", "--cask", "ollama"],
+      source: "homebrew-cask",
+    },
+  );
+});
+
+test("noninteractive Linux updates require PolicyKit or an interactive terminal", () => {
+  const withoutPolicyKit = (command, args) => {
+    if (command === "ollama" && args[0] === "--version") return { status: 0 };
+    return { status: 1 };
+  };
+  assert.throws(
+    () => ollamaUpdatePlan({ platform: "linux", spawn: withoutPolicyKit, interactive: false }),
+    /administrator permission/,
+  );
+  assert.equal(
+    ollamaUpdatePlan({ platform: "linux", spawn: withoutPolicyKit, interactive: true }).command,
+    "sh",
+  );
+});
+
+test("runtime status verifies the daemon instead of trusting managed state", () => {
+  const fakeSpawn = (command, args) => {
+    assert.equal(command, "ollama");
+    if (args[0] === "--version") {
+      return { status: 0, stdout: "ollama version is 0.32.6", stderr: "" };
+    }
+    assert.deepEqual(args, ["list"]);
+    return { status: 1, stdout: "", stderr: "connection refused" };
+  };
+  const snapshot = localOllamaRuntimeSnapshot({ spawn: fakeSpawn, platform: "linux" });
+  assert.equal(snapshot.installed, true);
+  assert.equal(snapshot.running, false);
+  assert.equal(snapshot.managed, false);
+});
+
+test("stale or dead local download workers become retryable errors", () => {
+  const alive = reconcileLocalDownload(
+    {
+      version: 1,
+      tag: "gemma4:12b",
+      status: "downloading",
+      startedAt: 1_000,
+      updatedAt: 1_900,
+      workerPid: 42,
+    },
+    { now: 2_000, kill: () => {}, persist: false },
+  );
+  assert.equal(alive.status, "downloading");
+
+  const dead = reconcileLocalDownload(
+    {
+      version: 1,
+      tag: "gemma4:12b",
+      status: "downloading",
+      startedAt: 1_000,
+      updatedAt: 1_900,
+      workerPid: 42,
+    },
+    {
+      now: 2_000,
+      kill: () => {
+        const error = new Error("missing");
+        error.code = "ESRCH";
+        throw error;
+      },
+      persist: false,
+    },
+  );
+  assert.equal(dead.status, "error");
+  assert.equal(dead.detail, "interrupted");
+  assert.match(dead.error, /Retry the install/);
+
+  const stale = reconcileLocalDownload(
+    {
+      version: 1,
+      tag: "gemma4:12b",
+      status: "downloading",
+      startedAt: 1_000,
+      updatedAt: 1_000,
+      workerPid: 42,
+    },
+    { now: 1_000_000, kill: () => {}, timeoutMs: 10_000, persist: false },
+  );
+  assert.equal(stale.status, "error");
+
+  const legacyStale = reconcileLocalDownload(
+    {
+      version: 1,
+      tag: "gemma4:12b",
+      status: "downloading",
+      startedAt: 1_000,
+      updatedAt: 1_000,
+    },
+    { now: 1_000_000, timeoutMs: 10_000, persist: false },
+  );
+  assert.equal(legacyStale.status, "error");
 });
 
 test("runtime probe and headless reuse never open the Ollama GUI", async () => {

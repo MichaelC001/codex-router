@@ -5,6 +5,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   writeFileSync,
 } from "node:fs";
@@ -152,6 +153,7 @@ export function ollamaInstallPlan({
   platform = process.platform,
   spawn = spawnSync,
   env = process.env,
+  interactive = Boolean(process.stdin.isTTY),
 } = {}) {
   if (platform === "darwin" && commandExists("brew", spawn)) {
     return {
@@ -177,6 +179,17 @@ export function ollamaInstallPlan({
     };
   }
   if (platform === "darwin") {
+    if (!interactive) {
+      return {
+        command: "/usr/bin/osascript",
+        args: [
+          "-e",
+          'do shell script "curl -fsSL https://ollama.com/install.sh | OLLAMA_NO_START=1 sh" with administrator privileges',
+        ],
+        label: "Ollama's official macOS installer (administrator authorization)",
+        hint: "curl -fsSL https://ollama.com/install.sh | OLLAMA_NO_START=1 sh",
+      };
+    }
     return {
       command: "sh",
       // Ollama's official installer supports macOS too. Its normal behavior
@@ -188,6 +201,23 @@ export function ollamaInstallPlan({
     };
   }
   if (platform === "linux") {
+    if (!interactive) {
+      if (commandExists("pkexec", spawn)) {
+        return {
+          command: "pkexec",
+          args: ["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
+          label: "Ollama's official Linux installer (PolicyKit)",
+          hint: "curl -fsSL https://ollama.com/install.sh | sh",
+        };
+      }
+      return {
+        command: undefined,
+        args: [],
+        label: "manual",
+        hint: "Run `curl -fsSL https://ollama.com/install.sh | sh` in a terminal so sudo can ask for permission.",
+        env,
+      };
+    }
     return {
       command: "sh",
       args: ["-c", "curl -fsSL https://ollama.com/install.sh | sh"],
@@ -207,16 +237,18 @@ export function installOllamaRuntime({
   spawn = spawnSync,
   platform = process.platform,
   env = process.env,
+  interactive = Boolean(process.stdin.isTTY),
 } = {}) {
   const existing = ollamaCommand({ spawn, platform });
   if (existing) return { installed: true, command: existing, version: ollamaVersion({ command: existing, spawn }) };
-  const plan = ollamaInstallPlan({ platform, spawn, env });
+  const plan = ollamaInstallPlan({ platform, spawn, env, interactive });
   if (!plan.command) {
     throw new Error(`Ollama is not installed. ${plan.hint}`);
   }
   const result = spawn(plan.command, plan.args, {
     stdio: "inherit",
     windowsHide: true,
+    env,
   });
   if (result.status !== 0) {
     throw new Error(`Ollama installation failed (exit ${result.status ?? "unknown"}).`);
@@ -226,28 +258,115 @@ export function installOllamaRuntime({
   return { installed: true, command, version: ollamaVersion({ command, spawn }) };
 }
 
+function resolvedCommand(command) {
+  let candidate = command;
+  if (!command.includes(path.sep)) {
+    const found = String(process.env.PATH || "")
+      .split(path.delimiter)
+      .filter(Boolean)
+      .map((directory) => path.join(directory, command))
+      .find((entry) => existsSync(entry));
+    if (found) candidate = found;
+  }
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return candidate;
+  }
+}
+
+export function ollamaUpdatePlan({
+  spawn = spawnSync,
+  platform = process.platform,
+  interactive = Boolean(process.stdin.isTTY),
+  resolveCommand = resolvedCommand,
+} = {}) {
+  const command = ollamaCommand({ spawn, platform });
+  if (!command) throw new Error("Ollama is not installed.");
+  const resolved = resolveCommand(command);
+  if (
+    platform === "darwin" &&
+    /\/Cellar\/ollama\//.test(resolved) &&
+    commandExists("brew", spawn) &&
+    spawn("brew", ["list", "--formula", "ollama"], { stdio: "ignore" }).status === 0
+  ) {
+    return { command: "brew", args: ["upgrade", "ollama"], source: "homebrew" };
+  }
+  if (
+    platform === "darwin" &&
+    resolved.includes("/Ollama.app/") &&
+    commandExists("brew", spawn) &&
+    spawn("brew", ["list", "--cask", "ollama"], { stdio: "ignore" }).status === 0
+  ) {
+    return {
+      command: "brew",
+      args: ["upgrade", "--cask", "ollama"],
+      source: "homebrew-cask",
+    };
+  }
+  if (platform === "win32" && commandExists("winget", spawn)) {
+    const listed = spawn("winget", ["list", "--id", "Ollama.Ollama", "--exact"], {
+      stdio: "ignore",
+    });
+    if (listed.status === 0) {
+      return {
+        command: "winget",
+        args: ["upgrade", "--id", "Ollama.Ollama", "--exact"],
+        source: "winget",
+      };
+    }
+  }
+  if (platform === "linux") {
+    if (!interactive) {
+      if (commandExists("pkexec", spawn)) {
+        return {
+          command: "pkexec",
+          args: ["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
+          source: "official-policykit",
+        };
+      }
+      throw new Error(
+        "Updating Ollama needs administrator permission. Run `curl -fsSL https://ollama.com/install.sh | sh` in a terminal.",
+      );
+    }
+    return {
+      command: "sh",
+      args: ["-c", "curl -fsSL https://ollama.com/install.sh | sh"],
+      source: "official",
+    };
+  }
+  if (platform === "darwin") {
+    if (!interactive) {
+      return {
+        command: "/usr/bin/osascript",
+        args: [
+          "-e",
+          'do shell script "curl -fsSL https://ollama.com/install.sh | OLLAMA_NO_START=1 sh" with administrator privileges',
+        ],
+        source: resolved.includes("/Ollama.app/") ? "official-app" : "official",
+      };
+    }
+    return {
+      command: "sh",
+      args: ["-c", "curl -fsSL https://ollama.com/install.sh | OLLAMA_NO_START=1 sh"],
+      source: resolved.includes("/Ollama.app/") ? "official-app" : "official",
+    };
+  }
+  throw new Error(`Update Ollama from https://ollama.com/download, then restart the router.`);
+}
+
 export function updateOllamaRuntime({
   spawn = spawnSync,
   platform = process.platform,
   env = process.env,
+  interactive = Boolean(process.stdin.isTTY),
 } = {}) {
   const command = ollamaCommand({ spawn, platform });
   if (!command) throw new Error("Ollama is not installed.");
-  let plan;
-  if (platform === "darwin" && commandExists("brew", spawn)) {
-    plan = { command: "brew", args: ["upgrade", "ollama"] };
-  } else if (platform === "win32" && commandExists("winget", spawn)) {
-    plan = { command: "winget", args: ["upgrade", "--id", "Ollama.Ollama", "--exact"] };
-  } else if (platform === "linux") {
-    plan = { command: "sh", args: ["-c", "curl -fsSL https://ollama.com/install.sh | sh"] };
-  } else if (platform === "darwin") {
-    plan = { command: "sh", args: ["-c", "curl -fsSL https://ollama.com/install.sh | OLLAMA_NO_START=1 sh"] };
-  } else {
-    throw new Error(`Update Ollama from https://ollama.com/download, then restart the router.`);
-  }
+  const plan = ollamaUpdatePlan({ spawn, platform, interactive });
   const result = spawn(plan.command, plan.args, { stdio: "inherit", windowsHide: true, env });
   if (result.status !== 0) throw new Error(`Ollama update failed (exit ${result.status ?? "unknown"}).`);
-  return { command, version: ollamaVersion({ command, spawn }) };
+  return { command, source: plan.source, version: ollamaVersion({ command, spawn }) };
 }
 
 export async function waitForOllama({
@@ -339,15 +458,30 @@ export async function ensureOllamaHeadless({
 export function localOllamaRuntimeSnapshot({
   spawn = spawnSync,
   platform = process.platform,
+  baseUrl = process.env.MODEL_ROUTER_LOCAL_BASE_URL || DEFAULT_OLLAMA_BASE_URL,
 } = {}) {
   const command = ollamaCommand({ spawn, platform });
   const state = readOllamaRuntimeState();
+  let running = false;
+  if (command) {
+    const host = ollamaHostForUrl(baseUrl);
+    try {
+      running = spawn(command, ["list"], {
+        encoding: "utf8",
+        timeout: 1500,
+        windowsHide: true,
+        env: { ...process.env, ...(host ? { OLLAMA_HOST: host } : {}) },
+      }).status === 0;
+    } catch {
+      running = false;
+    }
+  }
   return {
     installed: Boolean(command),
     command: command || null,
     version: command ? ollamaVersion({ command, spawn }) || null : null,
-    running: Boolean(state?.managed),
-    managed: Boolean(state?.managed),
+    running,
+    managed: running && Boolean(state?.managed),
     modelsPath: ollamaModelsPath({ platform }),
     logPath: OLLAMA_LOG_PATH,
   };
