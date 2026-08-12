@@ -394,6 +394,8 @@ export async function ensureOllamaHeadless({
   platform = process.platform,
   timeoutMs = 15_000,
 } = {}) {
+  const host = ollamaHostForUrl(baseUrl);
+  if (!host) throw new Error(`The configured local model endpoint is not loopback: ${baseUrl}`);
   const existingProbe = await probeOllama({ baseUrl, fetchImpl });
   if (existingProbe.reachable) {
     return {
@@ -414,8 +416,6 @@ export async function ensureOllamaHeadless({
     const plan = ollamaInstallPlan({ platform, spawn: spawnSyncImpl });
     throw new Error(`Ollama is not installed. ${plan.hint}`);
   }
-  const host = ollamaHostForUrl(baseUrl);
-  if (!host) throw new Error(`The configured local model endpoint is not loopback: ${baseUrl}`);
   mkdirSync(path.dirname(OLLAMA_LOG_PATH), { recursive: true, mode: 0o700 });
   const logFd = openSync(OLLAMA_LOG_PATH, "a", 0o600);
   let child;
