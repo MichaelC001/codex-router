@@ -293,17 +293,24 @@ ${exclusionComment}${resourceBlocks}
       ) do
         venv.pip_install relaxed
       end
-      system formula_opt_bin("node")/"node", "src/install-plan.mjs", "record", "node-deps"
-      system formula_opt_bin("node")/"node", "src/install-plan.mjs", "record", "python-deps"
+      # Older release archives predate the dependency fingerprint helper. The
+      # dependencies are already installed at this point, so those archives
+      # remain usable; newer releases record fingerprints for faster updates.
+      install_plan = libexec/"src/install-plan.mjs"
+      if install_plan.exist?
+        system formula_opt_bin("node")/"node", install_plan, "record", "node-deps"
+        system formula_opt_bin("node")/"node", install_plan, "record", "python-deps"
+      end
     end
 
     (bin/"codex-router").write <<~SH
       #!/bin/sh
+      source_root=$(CDPATH= cd -- "#{opt_libexec}" && pwd -P)
       export PATH="#{formula_opt_bin("node")}:$PATH"
-      export CODEX_ROUTER_SOURCE_ROOT="#{opt_libexec}"
+      export CODEX_ROUTER_SOURCE_ROOT="$source_root"
       export CODEX_ROUTER_NODE_BIN="#{formula_opt_bin("node")}/node"
       export CODEX_ROUTER_PACKAGE_MANAGER=homebrew
-      exec "#{opt_libexec}/bin/model-router" codex "$@"
+      exec "$source_root/bin/model-router" codex "$@"
     SH
   end
 
