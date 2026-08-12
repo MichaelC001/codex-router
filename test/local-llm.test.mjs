@@ -136,7 +136,12 @@ test("runtime updates use Homebrew only when it owns the Ollama formula", () => 
   const caskSpawn = (command, args) => {
     if (command === "ollama" && args[0] === "--version") return { status: 0 };
     if (command === "brew" && args[0] === "--version") return { status: 0 };
-    if (command === "brew" && args[0] === "list" && args[1] === "--cask") {
+    if (
+      command === "brew" &&
+      args[0] === "list" &&
+      args[1] === "--cask" &&
+      args[2] === "ollama-app"
+    ) {
       return { status: 0 };
     }
     return { status: 1 };
@@ -149,7 +154,7 @@ test("runtime updates use Homebrew only when it owns the Ollama formula", () => 
     }),
     {
       command: "brew",
-      args: ["upgrade", "--cask", "ollama"],
+      args: ["upgrade", "--cask", "ollama-app"],
       source: "homebrew-cask",
     },
   );

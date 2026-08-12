@@ -296,11 +296,11 @@ export function ollamaUpdatePlan({
     platform === "darwin" &&
     resolved.includes("/Ollama.app/") &&
     commandExists("brew", spawn) &&
-    spawn("brew", ["list", "--cask", "ollama"], { stdio: "ignore" }).status === 0
+    spawn("brew", ["list", "--cask", "ollama-app"], { stdio: "ignore" }).status === 0
   ) {
     return {
       command: "brew",
-      args: ["upgrade", "--cask", "ollama"],
+      args: ["upgrade", "--cask", "ollama-app"],
       source: "homebrew-cask",
     };
   }
