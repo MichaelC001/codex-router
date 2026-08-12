@@ -377,6 +377,18 @@ test("the explore catalog groups the requested Ollama families and keeps fit vis
   assert.equal(cloud.fit, "cloud-only");
   assert.equal(cloud.diskFit, "cloud-only");
   assert.equal(entries.find((entry) => entry.tag === "qwen3.5:2b-q4_K_M").sizeGb, 1.9);
+  assert.equal(
+    entries.find((entry) => entry.tag === "gemma4:latest").researchStatus,
+    "Official Ollama · 49 tags",
+  );
+  assert.deepEqual(
+    entries.find((entry) => entry.tag === "gemma4:latest").researchCapabilities,
+    ["vision", "tools", "thinking", "audio"],
+  );
+  assert.equal(
+    entries.find((entry) => entry.tag === "muse-glimmer:latest").researchStatus,
+    "Official Ollama · 15 tags",
+  );
 });
 
 // A GGUF header built by hand, so the parser is tested without the network and

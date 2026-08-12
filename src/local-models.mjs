@@ -29,7 +29,10 @@ import {
   ollamaModelsPath,
 } from "./ollama-runtime.mjs";
 import { readLocalDownload } from "./local-download.mjs";
-import { EXPLORE_LOCAL_MODELS } from "./local-ollama-catalog.mjs";
+import {
+  EXPLORE_LOCAL_MODELS,
+  LOCAL_FAMILY_RESEARCH,
+} from "./local-ollama-catalog.mjs";
 // The vision catalog is measured against a known image, so image readers are
 // taken from there rather than guessed at a second time here.
 import { LOCAL_VISION_CATALOG as VISION_CATALOG } from "./vision-host.mjs";
@@ -870,14 +873,21 @@ export function suggestedExploreModels({
   const fresh = notInstalled(installed);
   return EXPLORE_LOCAL_MODELS
     .filter((entry) => fresh(entry.tag))
-    .map((entry) => ({
-      ...entry,
-      family: splitLocalModelTag(entry.tag).family,
-      variant: splitLocalModelTag(entry.tag).variant,
-      displayName: entry.displayName || localModelDisplayName(entry.tag),
-      fit: entry.downloadable === false ? "cloud-only" : rateModelFit(entry.sizeGb, capacity),
-      diskFit: entry.downloadable === false ? "cloud-only" : rateDiskFit(entry.sizeGb, capacity),
-    }));
+    .map((entry) => {
+      const identity = splitLocalModelTag(entry.tag);
+      const research = LOCAL_FAMILY_RESEARCH[identity.family];
+      return {
+        ...entry,
+        family: identity.family,
+        variant: identity.variant,
+        displayName: entry.displayName || localModelDisplayName(entry.tag),
+        fit: entry.downloadable === false ? "cloud-only" : rateModelFit(entry.sizeGb, capacity),
+        diskFit: entry.downloadable === false ? "cloud-only" : rateDiskFit(entry.sizeGb, capacity),
+        researchStatus: research?.status || "Cataloged · compatibility unverified",
+        researchCapabilities: research?.capabilities || [],
+        researchNote: research?.note || "Verify capabilities after pull.",
+      };
+    });
 }
 
 // Mirrors the vision catalog's own ranking: measured-accurate, then partial,

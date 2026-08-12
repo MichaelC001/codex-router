@@ -1877,6 +1877,12 @@ struct AvailableLocalModel: Decodable, Identifiable, Equatable {
   let diskFit: String?
   let speedStatus: String?
   let downloadable: Bool?
+  /// Research captured from the official Ollama family page. This is kept
+  /// separate from `tools` and `codex`: upstream capability labels are not a
+  /// substitute for a real post-install Codex check.
+  let researchStatus: String?
+  let researchCapabilities: [String]?
+  let researchNote: String?
   var id: String { tag }
 
   var isVerified: Bool { codex == "verified" }
@@ -2462,6 +2468,7 @@ private struct TrayView: View {
     @State private var localDetailsExpanded = false
     @State private var expandedLocalFamilies = Set<String>()
     @State private var expandedLocalVariants = Set<String>()
+    @State private var variantHelpExpanded = false
     @State private var localCatalogFilter = ""
     @State private var installTag = ""
     @State private var armedRemoval: String?
@@ -2478,6 +2485,9 @@ private struct TrayView: View {
       let family: String
       let displayName: String
       let models: [AvailableLocalModel]
+      let researchStatus: String?
+      let researchCapabilities: [String]
+      let researchNote: String?
       var id: String { family }
     }
 
@@ -2744,7 +2754,7 @@ private struct TrayView: View {
 
     @ViewBuilder private func localCatalogSection(_ explore: [AvailableLocalModel]) -> some View {
       let cloudCount = explore.filter { $0.downloadable == false }.count
-      let visibleVariantCount = localCatalogFamilies.reduce(0) { $0 + $1.models.count }
+      let visibleTagCount = localCatalogFamilies.reduce(0) { $0 + $1.models.count }
       let visibleCloudCount = localCatalogFamilies
         .flatMap(\.models)
         .filter { $0.downloadable == false }
@@ -2752,13 +2762,26 @@ private struct TrayView: View {
       let showingAllCatalog = localCatalogFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       let shownCloudCount = showingAllCatalog ? cloudCount : visibleCloudCount
       let catalogDetail = showingAllCatalog
-        ? "\(localCatalogFamilies.count) families · \(explore.count) variants"
-        : "\(localCatalogFamilies.count) families · \(visibleVariantCount) matches"
+        ? "\(localCatalogFamilies.count) families · \(explore.count) tags"
+        : "\(localCatalogFamilies.count) families · \(visibleTagCount) matches"
       downloadHeader(
         "DISCOVER OLLAMA",
         detail: catalogDetail +
           (shownCloudCount > 0 ? " · \(shownCloudCount) cloud-only" : "")
       )
+      Button(variantHelpExpanded ? "Hide tag guide" : "What do these tags mean?") {
+        withAnimation(.easeOut(duration: 0.15)) { variantHelpExpanded.toggle() }
+      }
+      .buttonStyle(.borderless)
+      .font(.system(size: 8, weight: .medium))
+      .foregroundStyle(routerMutedStrong)
+      if variantHelpExpanded {
+        Text("Size tags choose the model scale. Q4/Q8/BF16 are weight precision; MLX/NVFP4 are hardware-oriented builds; cloud tags run remotely. Codex compatibility is checked only after a pull.")
+          .font(.system(size: 8))
+          .foregroundStyle(routerMuted)
+          .fixedSize(horizontal: false, vertical: true)
+          .padding(.top, 2)
+      }
       HStack(spacing: 6) {
         TextField("Search family or tag", text: $localCatalogFilter)
           .textFieldStyle(.roundedBorder)
@@ -2841,6 +2864,33 @@ private struct TrayView: View {
 
     @ViewBuilder private func localFamilyPanel(_ family: LocalCatalogFamily) -> some View {
       let recommended = recommendedLocalVariant(in: family.models)
+      let expanded = expandedLocalVariants.contains(family.id)
+      let visibleVariants = expanded
+        ? family.models
+        : localPreviewVariants(in: family.models, excluding: recommended)
+      let rows = visibleVariants.filter { $0.tag != recommended?.tag }
+      let shownCount = rows.count + (recommended == nil ? 0 : 1)
+      let hiddenCount = max(0, family.models.count - shownCount)
+
+      if let status = family.researchStatus {
+        HStack(spacing: 4) {
+          Text(status)
+          if !family.researchCapabilities.isEmpty {
+            Text("· " + family.researchCapabilities.joined(separator: " · "))
+          }
+        }
+        .font(.system(size: 8, weight: .medium))
+        .foregroundStyle(routerMutedStrong)
+        .lineLimit(1)
+        .truncationMode(.tail)
+      }
+      if let note = family.researchNote {
+        Text(note)
+          .font(.system(size: 8))
+          .foregroundStyle(routerMuted)
+          .fixedSize(horizontal: false, vertical: true)
+          .padding(.bottom, 2)
+      }
       if let recommended {
         Text("BEST FIT FOR THIS MAC")
           .font(.system(size: 8, weight: .semibold))
@@ -2859,13 +2909,16 @@ private struct TrayView: View {
           .padding(.bottom, 1)
       }
 
-      let variants = family.models.filter { $0.tag != recommended?.tag }
-      if !variants.isEmpty {
-        Button(
-          expandedLocalVariants.contains(family.id)
-            ? "Hide \(variants.count) variants"
-            : "Show \(variants.count) variants"
-        ) {
+      if !rows.isEmpty {
+        VStack(spacing: 6) {
+          ForEach(rows) { model in
+            exploreLocalRow(model)
+          }
+        }
+        .padding(.top, 3)
+      }
+      if expanded || hiddenCount > 0 {
+        Button(expanded ? "Show fewer tags" : "View all \(family.models.count) tags") {
           withAnimation(.easeOut(duration: 0.15)) {
             if expandedLocalVariants.contains(family.id) {
               expandedLocalVariants.remove(family.id)
@@ -2877,13 +2930,6 @@ private struct TrayView: View {
         .buttonStyle(.borderless)
         .font(.system(size: 9, weight: .medium))
         .foregroundStyle(routerMutedStrong)
-        if expandedLocalVariants.contains(family.id) {
-          VStack(spacing: 6) {
-            ForEach(variants) { model in
-              exploreLocalRow(model)
-            }
-          }
-        }
       }
     }
 
@@ -2917,7 +2963,7 @@ private struct TrayView: View {
           }
         }
         if let families = localModels?.families, !families.isEmpty {
-          Text("\(families.count) Ollama families; variants are grouped above.")
+          Text("\(families.count) Ollama families; exact tags are grouped above.")
             .font(.system(size: 8))
             .foregroundStyle(routerMuted)
         }
@@ -2937,14 +2983,14 @@ private struct TrayView: View {
       HStack(spacing: 5) {
         VStack(alignment: .leading, spacing: 1) {
           HStack(spacing: 4) {
-            Text(model.variant ?? model.tag)
+            Text(localVariantTitle(model))
               .font(.system(size: 9, weight: isRecommended ? .semibold : .medium))
               .lineLimit(1)
               .truncationMode(.tail)
-            if isRecommended {
-              Text("BEST FIT")
+            if let badge = localVariantBadge(model, isRecommended: isRecommended) {
+              Text(badge)
                 .font(.system(size: 7, weight: .semibold))
-                .foregroundStyle(routerMint)
+                .foregroundStyle(localVariantBadgeColor(model, isRecommended: isRecommended))
             }
           }
           Text(model.tag)
@@ -2973,6 +3019,46 @@ private struct TrayView: View {
             .foregroundStyle(routerMutedStrong)
         }
       }
+    }
+
+    private func localVariantTitle(_ model: AvailableLocalModel) -> String {
+      guard let variant = model.variant, !variant.isEmpty else { return model.tag }
+      switch variant.lowercased() {
+      case "latest": return "Default"
+      case "cloud": return "Cloud"
+      default: break
+      }
+      if localVariantIsStandard(model) { return variant.uppercased() }
+      let lower = variant.lowercased()
+      if lower.contains("mlx") { return "Apple Silicon build" }
+      if lower.contains("nvfp4") { return "NVFP4 build" }
+      if lower.contains("q4") || lower.contains("int4") { return "4-bit build" }
+      if lower.contains("q8") || lower.contains("int8") { return "8-bit build" }
+      if lower.contains("bf16") { return "BF16 build" }
+      if lower.contains("coding") { return "Coding build" }
+      return "Specialized build"
+    }
+
+    private func localVariantBadge(
+      _ model: AvailableLocalModel,
+      isRecommended: Bool
+    ) -> String? {
+      if isRecommended { return "BEST FIT" }
+      if model.downloadable == false { return "CLOUD" }
+      if model.variant == "latest" { return "DEFAULT" }
+      if model.fit == "tight" || model.diskFit == "tight" { return "TIGHT" }
+      if !localModelFits(model) { return "WON'T FIT" }
+      return nil
+    }
+
+    private func localVariantBadgeColor(
+      _ model: AvailableLocalModel,
+      isRecommended: Bool
+    ) -> Color {
+      if isRecommended || localModelFits(model) { return routerMint }
+      if model.downloadable == false { return routerMutedStrong }
+      if model.fit == "tight" || model.diskFit == "tight" { return routerYellow }
+      return routerRed
     }
 
     @ViewBuilder private func quickCodingRow(_ model: AvailableLocalModel) -> some View {
@@ -3275,10 +3361,15 @@ private struct TrayView: View {
       let grouped = Dictionary(grouping: filtered, by: localCatalogFamilyID)
       return grouped
         .map { family, models in
-          LocalCatalogFamily(
+          let sorted = models.sorted { localVariantSort($0, $1) }
+          let research = sorted.first
+          return LocalCatalogFamily(
             family: family,
             displayName: localCatalogFamilyName(family),
-            models: models.sorted { localVariantSort($0, $1) }
+            models: sorted,
+            researchStatus: research?.researchStatus,
+            researchCapabilities: research?.researchCapabilities ?? [],
+            researchNote: research?.researchNote
           )
         }
         .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
@@ -3307,6 +3398,47 @@ private struct TrayView: View {
       return left.tag.localizedCaseInsensitiveCompare(right.tag) == .orderedAscending
     }
 
+    private func localPreviewVariants(
+      in models: [AvailableLocalModel],
+      excluding recommended: AvailableLocalModel?
+    ) -> [AvailableLocalModel] {
+      let candidates = models.filter { $0.tag != recommended?.tag }
+      let previewLimit = recommended == nil ? 3 : 2
+      var selected: [AvailableLocalModel] = []
+      var sizes = Set<String>()
+
+      func add(_ model: AvailableLocalModel?) {
+        guard let model, selected.count < previewLimit else { return }
+        // `latest` and a plain size tag often point to the same digest. Avoid
+        // showing two rows for one download while leaving every exact tag in
+        // the full list.
+        let sizeKey = model.downloadable == false
+          ? "cloud"
+          : String(format: "%.1f", model.sizeGb)
+        guard sizes.insert(sizeKey).inserted else { return }
+        selected.append(model)
+      }
+
+      add(candidates.first(where: { $0.variant == "latest" }))
+
+      let standard = candidates.filter { localVariantIsStandard($0) }
+      add(standard.first(where: localModelFits))
+      add(standard.last(where: localModelFits))
+      add(candidates.first(where: { $0.downloadable == false }))
+      add(standard.first)
+      add(candidates.first)
+      return selected
+    }
+
+    private func localVariantIsStandard(_ model: AvailableLocalModel) -> Bool {
+      guard let variant = model.variant?.lowercased(), !variant.isEmpty else { return false }
+      if variant == "latest" || variant == "cloud" { return true }
+      // Plain size tags such as `9b`, `35b`, or `e4b` are the understandable
+      // family choices. Everything with a suffix is a precision, runtime, or
+      // task-specific build and belongs behind “View all tags”.
+      return !variant.contains("-") && !variant.contains("_")
+    }
+
     private func localModelFits(_ model: AvailableLocalModel) -> Bool {
       model.downloadable != false
         && model.fit != "too-large"
@@ -3316,7 +3448,7 @@ private struct TrayView: View {
     private func localFamilySummary(_ family: LocalCatalogFamily) -> String {
       let fits = family.models.filter(localModelFits).count
       let cloud = family.models.filter { $0.downloadable == false }.count
-      var parts = ["\(family.models.count) variants"]
+      var parts = ["\(family.models.count) tags"]
       if fits > 0 {
         parts.append("\(fits) fit")
       } else if cloud == family.models.count {

@@ -5,6 +5,48 @@
 // and model-page URLs remain supported by the install field.
 // Captured from the official pages on 2026-08-11.
 
+// The tag list is intentionally exhaustive, but the tray should not make a
+// first-time user choose between every quantization and accelerator build.
+// Keep the human-readable research summary beside the capture so the UI can
+// distinguish upstream claims from the router's own post-install checks.
+export const LOCAL_FAMILY_RESEARCH = Object.freeze({
+  gemma4: Object.freeze({
+    status: "Official Ollama · 49 tags",
+    capabilities: Object.freeze(["vision", "tools", "thinking", "audio"]),
+    note: "Multimodal Gemma 4 family for reasoning, coding, and agentic work.",
+  }),
+  "qwen3.5": Object.freeze({
+    status: "Official Ollama · 64 tags",
+    capabilities: Object.freeze(["vision", "tools", "thinking"]),
+    note: "Multimodal Qwen family with sizes from 0.8B to 122B.",
+  }),
+  "qwen3.6": Object.freeze({
+    status: "Official Ollama · 30 tags",
+    capabilities: Object.freeze(["vision", "tools", "thinking"]),
+    note: "Qwen's newer agentic-coding and thinking-focused family.",
+  }),
+  "nemotron-3-super": Object.freeze({
+    status: "Official Ollama · 7 tags",
+    capabilities: Object.freeze(["tools", "thinking", "cloud"]),
+    note: "120B MoE model with roughly 12B active parameters; local builds are large.",
+  }),
+  ornith: Object.freeze({
+    status: "Official Ollama · 9 tags",
+    capabilities: Object.freeze(["tools"]),
+    note: "Self-improving open-source family focused on agentic coding.",
+  }),
+  nemotron3: Object.freeze({
+    status: "Official Ollama · 4 tags",
+    capabilities: Object.freeze(["vision", "tools", "thinking"]),
+    note: "33B multimodal Nemotron family with a 128K context window.",
+  }),
+  "muse-glimmer": Object.freeze({
+    status: "Official Ollama · 15 tags",
+    capabilities: Object.freeze(["vision", "tools", "thinking"]),
+    note: "Meta's 30B open model for long-running local agents and tool use.",
+  }),
+});
+
 export const EXPLORE_LOCAL_MODELS = Object.freeze(
   [
     {"tag": "gemma4:latest", "sizeGb": 9.6, "tools": false, "context": 131072, "codex": "unverified", "displayName": "Gemma 4 · latest", "note": "Official Ollama tag; capabilities are checked after pull.", "downloadable": true},
