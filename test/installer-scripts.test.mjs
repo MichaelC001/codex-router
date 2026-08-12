@@ -132,6 +132,16 @@ test("Homebrew setup never reconciles package-manager-owned dependencies", () =>
   );
 });
 
+test("Homebrew force-deps fails early with the package-manager repair command", () => {
+  const result = spawnSync("sh", [path.join(root, "bin", "install"), "--force-deps"], {
+    encoding: "utf8",
+    env: { ...process.env, CODEX_ROUTER_PACKAGE_MANAGER: "homebrew" },
+  });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /brew reinstall codex-router/);
+  assert.doesNotMatch(result.stdout, /npm ci|LiteLLM|service|catalog/i);
+});
+
 test(
   "POSIX install and enable preserve the PATH-selected Node wrapper",
   { skip: process.platform === "win32" },

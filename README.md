@@ -528,6 +528,7 @@ model_catalog_json = "/absolute/path/to/.codex/codex-router/merged-models.json"
 name = "Codex Router (external models)"
 base_url = "http://127.0.0.1:4202/_codex-router/<generated-capability>/v1"
 wire_api = "responses"
+supports_standalone_web_search = true
 # END codex-router-provider-managed
 ```
 

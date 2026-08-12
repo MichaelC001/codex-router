@@ -41,6 +41,10 @@ if [ "$migrate_known" = true ] && [ "$adopt_native_catalog" = true ]; then
   echo "--adopt-native-catalog cannot be combined with --migrate-known." >&2
   exit 2
 fi
+if [ "${CODEX_ROUTER_PACKAGE_MANAGER:-}" = homebrew ] && [ "$force_deps" = true ]; then
+  echo "--force-deps cannot rebuild Homebrew-managed dependencies; run brew reinstall codex-router instead." >&2
+  exit 2
+fi
 platform=$(uname -s)
 case "$platform" in
   Darwin|Linux) ;;
@@ -81,14 +85,15 @@ fi
 if [ "$prepare_only" != true ]; then
   node src/provider-selection.mjs ensure-configured >/dev/null
 fi
-# Every update re-runs this installer, so the dependency steps are skipped when
-# their inputs are unchanged; --force-deps (used by doctor --fix) rebuilds them.
+# Every update re-runs this installer, so checkout-owned dependency steps are
+# skipped when their inputs are unchanged; --force-deps (used by doctor --fix)
+# rebuilds them. Homebrew assembles its dependency tree before this script runs.
 install_step() {
   # A package-manager checkout already contains the dependency tree assembled
   # by that package manager. Re-running npm/pip here would mutate its managed
   # prefix and can fail when packages intentionally have no pip RECORD (as
-  # Homebrew-installed Python resources do). Even --force-deps must leave that
-  # tree to the package manager; repair it with brew reinstall instead.
+  # Homebrew-installed Python resources do). The explicit --force-deps case is
+  # rejected above with its package-manager repair command.
   if [ "${CODEX_ROUTER_PACKAGE_MANAGER:-}" = homebrew ]; then
     echo managed
   elif [ "$force_deps" = true ]; then

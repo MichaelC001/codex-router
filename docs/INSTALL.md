@@ -313,11 +313,15 @@ Any other non-zero exit still restores the previous revision. Re-run setup to
 continue, or `./bin/rollback` (`./codex-router.ps1 rollback` on Windows) to
 return to the retained revision deliberately.
 
-The reinstall skips dependency work whose inputs are unchanged, so an update
-that carries no `package-lock.json` or LiteLLM pin change costs a service
-restart rather than a full `npm ci` and PyPI resolution. `./bin/doctor --fix`
-rebuilds them regardless, as does `./bin/install --force-deps`
-(`./install.ps1 -CheckoutInstall -ForceDeps` on Windows).
+For checkout installs, the reinstall skips dependency work whose inputs are
+unchanged, so an update that carries no `package-lock.json` or LiteLLM pin
+change costs a service restart rather than a full `npm ci` and PyPI resolution.
+`./bin/doctor --fix` rebuilds checkout-owned dependencies regardless, as does
+`./bin/install --force-deps` (`./install.ps1 -CheckoutInstall -ForceDeps` on
+Windows). Homebrew owns the dependency tree in its formula prefix: its normal
+doctor repair regenerates config and services without mutating that tree, and a
+missing or broken package file must be repaired with `brew reinstall
+codex-router`.
 
 When upgrading from a release without caller capabilities, the installer
 generates one, replaces only the marked managed URL, tightens config permissions,
