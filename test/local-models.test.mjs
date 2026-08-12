@@ -361,6 +361,17 @@ test("the explore catalog groups the requested Ollama families and keeps fit vis
     "qwen3.6:35b-a3b-mtp-q4_K_M",
     "nemotron-3-super:120b",
     "nemotron-3-super:120b-a12b-q8_0",
+    "nemotron-3.5-lightning:latest",
+    "nemotron-3.5-lightning:30b",
+    "nemotron-3.5-lightning:30b-a3b",
+    "nemotron-3.5-lightning:30b-a3b-q4_K_M",
+    "nemotron-3.5-lightning:30b-a3b-mlx",
+    "nemotron-3.5-lightning:30b-a3b-mlx-bf16",
+    "nemotron-3.5-lightning:30b-a3b-mxfp8",
+    "nemotron-3.5-lightning:30b-a3b-nvfp4",
+    "nemotron-3.5-lightning:30b-a3b-q8_0",
+    "nemotron-3.5-lightning:30b-a3b-bf16",
+    "nemotron-3.5-lightning:30b-mlx",
     "ornith:9b",
     "ornith:35b-bf16",
     "nemotron3:33b",
@@ -370,8 +381,8 @@ test("the explore catalog groups the requested Ollama families and keeps fit vis
   ]) assert.ok(tags.has(tag), tag);
   assert.equal(entries.find((entry) => entry.tag === "nemotron-3-super:120b").fit, "too-large");
   assert.equal(entries.find((entry) => entry.tag === "gemma4:12b").tools, false);
-  assert.equal(EXPLORE_LOCAL_MODELS.length, 178);
-  assert.equal(new Set(EXPLORE_LOCAL_MODELS.map((entry) => entry.tag)).size, 178);
+  assert.equal(EXPLORE_LOCAL_MODELS.length, 189);
+  assert.equal(new Set(EXPLORE_LOCAL_MODELS.map((entry) => entry.tag)).size, 189);
   const cloud = entries.find((entry) => entry.tag === "qwen3.5:cloud");
   assert.equal(cloud.downloadable, false);
   assert.equal(cloud.fit, "cloud-only");
@@ -388,6 +399,14 @@ test("the explore catalog groups the requested Ollama families and keeps fit vis
   assert.equal(
     entries.find((entry) => entry.tag === "muse-glimmer:latest").researchStatus,
     "Official Ollama · 15 tags",
+  );
+  assert.equal(
+    entries.find((entry) => entry.tag === "nemotron-3.5-lightning:latest").researchStatus,
+    "Official Ollama · 11 tags",
+  );
+  assert.deepEqual(
+    entries.find((entry) => entry.tag === "nemotron-3.5-lightning:latest").researchCapabilities,
+    ["tools", "thinking"],
   );
 });
 
