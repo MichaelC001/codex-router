@@ -139,6 +139,7 @@ function routedRequestPayload(stream = true, model = "opencode-go/deepseek-v4-fl
       { type: "function_call_output", call_id: "call_hist", output: "{}" },
     ],
     tools: [
+      { type: "tool_search" },
       { type: "function", name: "exec_command" },
       { type: "function", name: "view_image" },
       {
@@ -455,6 +456,10 @@ test("routed request flattens every namespace to the gateway and restores calls 
   assert.ok(
     outgoing.tools.every((tool) => tool?.type !== "namespace"),
     "no namespace entries reach the gateway",
+  );
+  assert.ok(
+    outgoing.tools.every((tool) => tool?.type !== "tool_search"),
+    "deferred tool search does not reach a function-only provider",
   );
   // The merged codex_app tool definitions keep their schema.
   const createThread = outgoing.tools.find((tool) => tool.name === "codex_app__create_thread");

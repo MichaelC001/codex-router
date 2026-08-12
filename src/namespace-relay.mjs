@@ -99,6 +99,15 @@ export function flattenNamespaceTools(tools) {
   const spawnAgentModels = new Set();
   let changed = false;
   for (const tool of tools) {
+    // Codex adds this control tool when one or more namespace tools use
+    // deferred loading. By this boundary every namespace is expanded below,
+    // so the search control is redundant; chat-completions providers accept
+    // only ordinary function tools and reject `type: "tool_search"` before
+    // the model can call any MCP function.
+    if (tool?.type === "tool_search") {
+      changed = true;
+      continue;
+    }
     if (tool?.type === "namespace" && Array.isArray(tool.tools)) {
       const names = new Set();
       for (const fn of tool.tools) {
