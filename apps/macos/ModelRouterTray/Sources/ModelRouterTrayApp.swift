@@ -714,7 +714,21 @@ final class RouterStore: ObservableObject {
     do {
       let output = try await runControl(arguments: ["--json"])
       snapshot = try JSONDecoder().decode(RouterSnapshot.self, from: output)
-      let reportedLocalDownload = snapshot.targets["codex"]?.modelSettings?.localModels?.download
+      let reportedLocalModels = snapshot.targets["codex"]?.modelSettings?.localModels
+      let installedLocalTags = Set(reportedLocalModels?.models.map(\.tag) ?? [])
+      let rawReportedLocalDownload = reportedLocalModels?.download
+      // The protected download record intentionally survives completion, but
+      // it stops describing reality after that model is removed from Ollama.
+      // Never render a stale "ready · 100%" result for an uninstalled tag.
+      let reportedLocalDownload: VisionDownloadState?
+      if let reported = rawReportedLocalDownload,
+         reported.status == "done",
+         let tag = reported.tag,
+         !installedLocalTags.contains(tag) {
+        reportedLocalDownload = nil
+      } else {
+        reportedLocalDownload = rawReportedLocalDownload
+      }
       // A click publishes an optimistic state before the control process has
       // finished its registry/runtime preflight. Do not let a concurrent
       // refresh replace that state with an older snapshot (or nil), otherwise
