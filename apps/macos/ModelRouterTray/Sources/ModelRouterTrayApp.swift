@@ -16,6 +16,21 @@ let routerMuted = Color.primary.opacity(0.76)
 let routerMutedStrong = Color.primary.opacity(0.90)
 let removalArmWindow: TimeInterval = 4
 
+enum LocalModelOperationKind: Equatable {
+  case uninstall
+
+  var label: String {
+    switch self {
+    case .uninstall: return "Uninstalling"
+    }
+  }
+}
+
+struct LocalModelOperation: Equatable {
+  let tag: String
+  let kind: LocalModelOperationKind
+}
+
 enum RouterActivityState: String, Decodable {
   case idle
   case generating
@@ -114,6 +129,7 @@ final class RouterStore: ObservableObject {
   @Published private(set) var providerOperation: String?
   @Published private(set) var visionDownload: VisionDownloadState?
   @Published private(set) var localDownload: VisionDownloadState?
+  @Published private(set) var localModelOperation: LocalModelOperation?
   @Published private(set) var benchmarkingTag: String?
   @Published private(set) var maintenanceMessage: String?
   @Published private(set) var maintenanceSucceeded = false
@@ -527,6 +543,36 @@ final class RouterStore: ObservableObject {
       return String(model[model.index(after: slash)...])
     }
     return model
+  }
+
+  func observedTokensPerSecond(providerID: String?, model: String?) -> Double? {
+    guard let model, !model.isEmpty else { return nil }
+    let displayName = model.split(separator: "/").last.map(String.init) ?? model
+    let matchingProviders: [RouterProviderUsage]
+    if let providerID,
+       let provider = providerUsage?.providers.first(where: { $0.id == providerID }) {
+      matchingProviders = [provider]
+    } else {
+      matchingProviders = providerUsage?.providers ?? []
+    }
+    let match = matchingProviders
+      .flatMap { $0.models ?? [] }
+      .first { $0.slug == model || $0.displayName == displayName }
+    if let speed = match?.observedTokensPerSecond { return speed }
+    // Protocol variants are folded into their canonical provider in the usage
+    // snapshot, so retry across providers before declaring the speed unknown.
+    return providerUsage?.providers
+      .flatMap { $0.models ?? [] }
+      .first { $0.slug == model || $0.displayName == displayName }?
+      .observedTokensPerSecond
+  }
+
+  var activeModelObservedTokensPerSecond: Double? {
+    let latest = activeRequests.last
+    return observedTokensPerSecond(
+      providerID: latest?.provider,
+      model: latest?.model ?? activeModel
+    )
   }
 
   func sessionName(for request: RouterActiveRequest) -> String {
@@ -1149,6 +1195,9 @@ final class RouterStore: ObservableObject {
   /// Deletes the model from disk. Irreversible short of downloading it again,
   /// so the tray arms the row before this is reachable.
   func uninstallLocalModel(_ tag: String) async {
+    guard providerOperation == nil, localModelOperation == nil else { return }
+    localModelOperation = LocalModelOperation(tag: tag, kind: .uninstall)
+    defer { localModelOperation = nil }
     await applyModelSettings(arguments: ["local-models", "uninstall", tag, "--yes"])
   }
 
@@ -1409,6 +1458,11 @@ final class RouterStore: ObservableObject {
         if !manuallySelectedUsageProvider {
           focusUsageProvider(provider)
         }
+      }
+      if previousActivityState == .generating, health.activity.state != .generating {
+        // Pull the just-finished request into the status speed without waiting
+        // for the normal 30-second account polling interval.
+        Task { await refreshProviderUsage() }
       }
     } catch {
       recordActivityHealthFailure()
@@ -1726,6 +1780,8 @@ struct RouterModelUsage: Decodable, Identifiable, Equatable {
   let inputTokens: Int64
   let outputTokens: Int64
   let totalTokens: Int64
+  let speedSampleCount: Int?
+  let observedTokensPerSecond: Double?
   let lastUsedAt: String?
 
   var id: String { slug }
@@ -2278,6 +2334,30 @@ private struct TrayView: View {
       Spacer()
     }
 
+    sectionLabel("Model speed", detail: speedSampleDetail)
+    HStack(alignment: .firstTextBaseline, spacing: 8) {
+      VStack(alignment: .leading, spacing: 2) {
+        Text(activeModelLabel)
+          .font(.system(size: 10, weight: .medium))
+          .lineLimit(1)
+          .truncationMode(.middle)
+        Text(speedExplanation)
+          .font(.system(size: 8))
+          .foregroundStyle(routerMuted)
+          .lineLimit(1)
+      }
+      Spacer(minLength: 8)
+      Text(activeModelSpeedLabel)
+        .font(.system(size: 15, weight: .semibold, design: .monospaced))
+        .foregroundStyle(store.activeModelObservedTokensPerSecond == nil ? routerMuted : routerMint)
+        .monospacedDigit()
+    }
+    .padding(9)
+    .background(
+      Color.primary.opacity(0.045),
+      in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+    )
+
     sectionLabel(
       "Live requests",
       detail: store.activeRequests.isEmpty ? "None" : "\(store.activeRequests.count)"
@@ -2335,6 +2415,34 @@ private struct TrayView: View {
     let chats = store.activeChatCount
     let requests = store.activeRequestCount
     return "\(chats) chat\(chats == 1 ? "" : "s") · \(requests) request\(requests == 1 ? "" : "s") in flight"
+  }
+
+  private var activeModelLabel: String {
+    guard let model = store.activeRequests.last?.model ?? store.activeModel else {
+      return "No model observed"
+    }
+    return model.split(separator: "/").last.map(String.init) ?? model
+  }
+
+  private var activeModelSpeedLabel: String {
+    guard let speed = store.activeModelObservedTokensPerSecond else { return "— tok/s" }
+    return "\(String(format: "%.1f", speed)) tok/s"
+  }
+
+  private var speedSampleDetail: String {
+    guard let model = store.activeRequests.last?.model ?? store.activeModel else { return "Waiting" }
+    let displayName = model.split(separator: "/").last.map(String.init) ?? model
+    let sampleCount = store.providerUsage?.providers
+      .flatMap { $0.models ?? [] }
+      .first { $0.slug == model || $0.displayName == displayName }?
+      .speedSampleCount ?? 0
+    return sampleCount == 0 ? "No samples" : "\(sampleCount) reply\(sampleCount == 1 ? "" : "s")"
+  }
+
+  private var speedExplanation: String {
+    store.activeModelObservedTokensPerSecond == nil
+      ? "Appears after a metered reply"
+      : "Observed output throughput"
   }
 
   // `startedAt` arrives as epoch milliseconds from the router health payload.
@@ -3162,10 +3270,14 @@ private struct TrayView: View {
       let tint = isError ? routerRed : (isDone ? routerMint : routerYellow)
       VStack(alignment: .leading, spacing: 4) {
         HStack(spacing: 6) {
-          Circle()
-            .fill(tint)
-            .frame(width: 6, height: 6)
-          Text(isError ? "Local model download failed" : (isDone ? "Local model ready" : "Downloading local model"))
+          if download.isRunning {
+            OperationPulse(tint: tint)
+          } else {
+            Circle()
+              .fill(tint)
+              .frame(width: 6, height: 6)
+          }
+          Text(isError ? "Local model install failed" : (isDone ? "Local model ready" : "Installing local model"))
             .font(.system(size: 9, weight: .semibold))
             .foregroundStyle(tint)
           Spacer(minLength: 4)
@@ -3199,11 +3311,13 @@ private struct TrayView: View {
     }
 
     @ViewBuilder private func downloadBar(tag: String?, percent: Int?) -> some View {
+      let tagLabel = tag.map { " \($0)" } ?? ""
       HStack(spacing: 6) {
+        OperationPulse(tint: routerMint)
         ProgressView(value: Double(percent ?? 0), total: 100)
           .progressViewStyle(.linear)
           .tint(routerMint)
-        Text("\(tag ?? "") \(percent ?? 0)%")
+        Text("Installing\(tagLabel) · \(percent ?? 0)%")
           .font(.system(size: 9, weight: .medium))
           .foregroundStyle(routerMint)
           .lineLimit(1)
@@ -3212,6 +3326,9 @@ private struct TrayView: View {
     }
 
     @ViewBuilder private func installedLocalRow(_ model: InstalledLocalModel) -> some View {
+      let operation = store.localModelOperation?.tag == model.tag
+        ? store.localModelOperation
+        : nil
       HStack(alignment: .top, spacing: 0) {
         // Codex drives every turn through tool calls, so a model without them
         // can never be a chat model. The checkbox goes dead rather than
@@ -3223,7 +3340,7 @@ private struct TrayView: View {
         .labelsHidden()
         .toggleStyle(.checkbox)
         .controlSize(.mini)
-        .disabled(busy || !model.canBeChatModel)
+        .disabled(busy || operation != nil || !model.canBeChatModel)
         .frame(width: Self.checkColumnWidth, alignment: .leading)
         VStack(alignment: .leading, spacing: 3) {
           HStack(spacing: 6) {
@@ -3275,7 +3392,20 @@ private struct TrayView: View {
             .buttonStyle(.borderless)
             .accessibilityLabel("Actions for \(model.tag)")
           }
-          if let download = store.localDownload,
+          if let operation {
+            HStack(spacing: 7) {
+              OperationPulse(tint: routerRed)
+              Text("\(operation.kind.label)…")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(routerRed)
+              ProgressView()
+                .controlSize(.mini)
+                .tint(routerRed)
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .leading)))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(operation.kind.label) \(model.tag)")
+          } else if let download = store.localDownload,
             download.isRunning,
             download.tag == model.tag {
             downloadBar(tag: nil, percent: download.percent)
@@ -3310,6 +3440,7 @@ private struct TrayView: View {
         }
       }
       .padding(.horizontal, 2)
+      .animation(.easeOut(duration: 0.2), value: operation)
     }
 
     // What this model is for, in one truncating phrase rather than a row of
@@ -4878,6 +5009,32 @@ private struct StatusBeacon: View {
     guard state == .generating || state == .starting, !reduceMotion else { return }
     withAnimation(.easeInOut(duration: 0.72).repeatForever(autoreverses: true)) {
       breathing = true
+    }
+  }
+}
+
+private struct OperationPulse: View {
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  let tint: Color
+  @State private var pulsing = false
+
+  var body: some View {
+    ZStack {
+      Circle()
+        .stroke(tint.opacity(0.34), lineWidth: 1)
+        .frame(width: 12, height: 12)
+        .scaleEffect(pulsing ? 1.35 : 0.65)
+        .opacity(pulsing ? 0 : 0.9)
+      Circle()
+        .fill(tint)
+        .frame(width: 6, height: 6)
+    }
+    .frame(width: 14, height: 14)
+    .onAppear {
+      guard !reduceMotion else { return }
+      withAnimation(.easeOut(duration: 0.9).repeatForever(autoreverses: false)) {
+        pulsing = true
+      }
     }
   }
 }
