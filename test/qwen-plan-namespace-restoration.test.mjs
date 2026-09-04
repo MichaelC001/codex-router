@@ -125,12 +125,14 @@ test("buildNamespaceLookupsFromTools handles namespace tools with nested names",
 
   const lookups = buildNamespaceLookupsFromTools(tools);
 
-  assert.equal(lookups.size, 1);
+  // Flat __ join plus dotted inventory alias (#611).
+  assert.equal(lookups.size, 2);
   const execute = lookups.get("mcp__node_repl__execute");
   assert.ok(execute, "Should restore tool from namespace entry");
   // Namespace preserves the full nested name
   assert.equal(execute.namespace, "mcp__node_repl");
   assert.equal(execute.name, "execute");
+  assert.equal(lookups.get("mcp__node_repl.execute"), execute);
 });
 
 test("createResponsesStreamTransform restores namespaced function calls", async () => {
@@ -399,12 +401,13 @@ test("buildNamespaceLookupsFromTools restores tools from namespace entries", () 
 
   const lookups = buildNamespaceLookupsFromTools(tools);
 
-  // Should restore the tool that came from a namespace entry
-  assert.equal(lookups.size, 1);
+  // Should restore the tool that came from a namespace entry, plus dotted alias
+  assert.equal(lookups.size, 2);
   const restored = lookups.get("mcp__node_repl__execute");
   assert.ok(restored, "Should restore tool from namespace entry");
   assert.equal(restored.namespace, "mcp__node_repl");
   assert.equal(restored.name, "execute");
+  assert.equal(lookups.get("mcp__node_repl.execute"), restored);
 });
 
 test("MCP-style names are left unchanged in responses without namespace tools", async () => {

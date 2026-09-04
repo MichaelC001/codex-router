@@ -2161,6 +2161,91 @@ test("response transform restores flattened calls to the native namespace shape"
   assert.doesNotMatch(output, /collaboration__spawn_agent|codex_app__create_thread|mcp__node_repl__js/);
 });
 
+// Issue #611: Responses-native routes (e.g. opencode-free-responses Muse Spark)
+// keep type:"namespace" tools outbound. Some models then call with a dotted
+// wire name (`collaboration.spawn_agent`, `mcp__agentmemory.memory_sessions`)
+// instead of the `__` flattening the reverse map indexes. Restore only from
+// the request inventory — never by splitting an arbitrary dotted string
+// (#568 declined bare name-map recovery that bypasses spawn sanitisation).
+test("response transform restores dotted wire names from the request inventory", () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [
+        {
+          type: "function",
+          name: "spawn_agent",
+          inputSchema: {
+            type: "object",
+            properties: {
+              model: { type: "string", enum: ["gpt-5.6-sol"] },
+            },
+          },
+        },
+      ],
+    },
+    {
+      type: "namespace",
+      name: "mcp__agentmemory",
+      tools: [{ type: "function", name: "memory_sessions" }],
+    },
+  ]);
+  const lookups = buildNamespaceLookups(namespaces);
+
+  const spawn = rewriteNamespaceResponsePayload(
+    {
+      output: [
+        {
+          type: "function_call",
+          name: "collaboration.spawn_agent",
+          call_id: "call_dot_spawn",
+          arguments: JSON.stringify({ model: "gpt-5.6-sol", task: "x" }),
+        },
+      ],
+    },
+    lookups,
+  );
+  assert.deepEqual(
+    { namespace: spawn.output[0].namespace, name: spawn.output[0].name },
+    { namespace: "collaboration", name: "spawn_agent" },
+  );
+
+  const mcp = rewriteNamespaceResponsePayload(
+    {
+      output: [
+        {
+          type: "function_call",
+          name: "mcp__agentmemory.memory_sessions",
+          call_id: "call_dot_mcp",
+          arguments: "{}",
+        },
+      ],
+    },
+    lookups,
+  );
+  assert.deepEqual(
+    { namespace: mcp.output[0].namespace, name: mcp.output[0].name },
+    { namespace: "mcp__agentmemory", name: "memory_sessions" },
+  );
+
+  // An invented dotted spelling that is not an inventory pair stays untouched.
+  const invented = rewriteNamespaceResponsePayload(
+    {
+      output: [
+        {
+          type: "function_call",
+          name: "collaboration.not_a_real_tool",
+          call_id: "call_invented",
+          arguments: "{}",
+        },
+      ],
+    },
+    lookups,
+  );
+  assert.equal(invented, undefined);
+});
+
 test("tool_search response bridge suppresses function argument events across its lifecycle", async () => {
   const { namespaces } = flattenNamespaceTools([clientToolSearchControl()]);
   const events = [
