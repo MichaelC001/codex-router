@@ -866,7 +866,9 @@ private struct IslandUsageLineChart: View {
       }
     }
     .onAppear { animateReveal() }
-    .onChange(of: points.map(\.tokens)) { _ in animateReveal() }
+    // Compare the Equatable points value, not a freshly mapped array allocated
+    // on every body pass (which interacted poorly with store reads during layout).
+    .onChange(of: points) { _ in animateReveal() }
     .onChange(of: reduceMotion) { _ in animateReveal() }
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(routerLocalized("Daily token usage line chart"))

@@ -1049,47 +1049,6 @@ final class RouterStore: ObservableObject {
   private var latestObservedActivityRequestID: String?
   private var lastObservedSessionID: String?
   private var activityHealthFailureStartedAt: Date?
-  private var dailyUsageCache: [DailyUsageCacheKey: [DailyUsagePoint]] = [:]
-  private var localUsageTotalsCache: [LocalUsageTotalsCacheKey: UsageTotals] = [:]
-
-  private struct DailyUsageCacheBucket: Hashable {
-    let startDate: String
-    let tokens: Int64
-    let isRouterFallback: Bool
-  }
-
-  private struct DailyUsageCacheKey: Hashable {
-    let providerID: String
-    let days: Int
-    let today: Date
-    let buckets: [DailyUsageCacheBucket]
-  }
-
-  private struct LocalUsageTotalsCacheBucket: Hashable {
-    let startDate: String
-    let tokens: Int64
-    let requests: Int
-  }
-
-  private struct LocalUsageTotalsCacheKey: Hashable {
-    let providerID: String
-    let days: Int
-    let today: Date
-    let buckets: [LocalUsageTotalsCacheBucket]
-  }
-
-  private struct UsageTotals {
-    let tokens: Double
-    let requests: Int
-  }
-
-  private static let dayKeyFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.calendar = Calendar(identifier: .gregorian)
-    formatter.dateFormat = "yyyy-MM-dd"
-    return formatter
-  }()
 
   // What the three stored signals mean, as one pure decision. Pulled out of
   // `init` so it can be tested: the mode this picks is the difference between
@@ -2378,7 +2337,10 @@ final class RouterStore: ObservableObject {
   }
 
   func dailyUsage(for providerID: String, days: Int) -> [DailyUsagePoint] {
-    let buckets: [DailyUsageCacheBucket]
+    // Pure read: never mutate store state from a SwiftUI body call site.
+    // Issue #601 pegged a core when the old memo keyed on growing bucket
+    // arrays and wrote that cache during layout of the usage LazyVGrid.
+    let buckets: [DailyUsageDisplayBucket]
     if providerID == "openai" {
       // OpenAI's account stream is authoritative whenever it contains a date.
       // The local OpenAI provider stream is narrower router telemetry, so it
@@ -2386,41 +2348,23 @@ final class RouterStore: ObservableObject {
       buckets = mergeAccountUsageBuckets(
         account: accountUsage?.dailyUsageBuckets ?? [],
         router: providerUsage(for: "openai")?.dailyUsageBuckets ?? []
-      ).map {
-        DailyUsageCacheBucket(
-          startDate: $0.startDate,
-          tokens: $0.tokens,
-          isRouterFallback: $0.isRouterFallback
-        )
-      }
+      )
     } else {
       buckets = providerUsage(for: providerID)?.dailyUsageBuckets.map {
-        DailyUsageCacheBucket(startDate: $0.startDate, tokens: $0.tokens, isRouterFallback: false)
+        DailyUsageDisplayBucket(
+          startDate: $0.startDate,
+          tokens: $0.tokens,
+          isRouterFallback: false
+        )
       } ?? []
     }
     let calendar = Calendar.current
-    let today = calendar.startOfDay(for: .now)
-    let cacheKey = DailyUsageCacheKey(
-      providerID: providerID,
+    return dailyUsagePoints(
+      from: buckets,
       days: days,
-      today: today,
-      buckets: buckets
+      today: calendar.startOfDay(for: .now),
+      calendar: calendar
     )
-    if let cached = dailyUsageCache[cacheKey] { return cached }
-
-    let indexed = Dictionary(uniqueKeysWithValues: buckets.map { ($0.startDate, $0) })
-    let points = (0..<days).map { offset in
-      let date = calendar.date(byAdding: .day, value: offset - (days - 1), to: today) ?? today
-      let bucket = indexed[Self.dayKeyFormatter.string(from: date)]
-      return DailyUsagePoint(
-        date: date,
-        tokens: Double(bucket?.tokens ?? 0),
-        isRouterFallback: bucket?.isRouterFallback ?? false
-      )
-    }
-    if dailyUsageCache.count >= 24 { dailyUsageCache.removeAll(keepingCapacity: true) }
-    dailyUsageCache[cacheKey] = points
-    return points
   }
 
   func localUsageTotals(days: Int) -> (tokens: Double, requests: Int) {
@@ -2430,38 +2374,12 @@ final class RouterStore: ObservableObject {
   func localUsageTotals(for providerID: String, days: Int) -> (tokens: Double, requests: Int) {
     guard providerID != "openai", let usage = providerUsage(for: providerID) else { return (0, 0) }
     let calendar = Calendar.current
-    let today = calendar.startOfDay(for: .now)
-    let buckets = usage.dailyUsageBuckets.map {
-      LocalUsageTotalsCacheBucket(
-        startDate: $0.startDate,
-        tokens: $0.tokens,
-        requests: $0.requests
-      )
-    }
-    let cacheKey = LocalUsageTotalsCacheKey(
-      providerID: providerID,
+    return sumLocalUsageTotals(
+      from: usage.dailyUsageBuckets,
       days: days,
-      today: today,
-      buckets: buckets
+      today: calendar.startOfDay(for: .now),
+      calendar: calendar
     )
-    if let cached = localUsageTotalsCache[cacheKey] {
-      return (cached.tokens, cached.requests)
-    }
-
-    let firstDay = calendar.date(byAdding: .day, value: -(days - 1), to: today) ?? today
-    let totals = usage.dailyUsageBuckets.reduce(into: (tokens: 0.0, requests: 0)) { totals, bucket in
-      guard let date = Self.dayKeyFormatter.date(from: bucket.startDate),
-            date >= firstDay,
-            date <= today
-      else { return }
-      totals.tokens += Double(bucket.tokens)
-      totals.requests += bucket.requests
-    }
-    if localUsageTotalsCache.count >= 48 {
-      localUsageTotalsCache.removeAll(keepingCapacity: true)
-    }
-    localUsageTotalsCache[cacheKey] = UsageTotals(tokens: totals.tokens, requests: totals.requests)
-    return totals
   }
 
   func localUsageSummary(for providerID: String, days: Int = 7) -> String {
@@ -4524,6 +4442,14 @@ struct DailyUsageDisplayBucket: Equatable {
   let isRouterFallback: Bool
 }
 
+let dailyUsageDayKeyFormatter: DateFormatter = {
+  let formatter = DateFormatter()
+  formatter.locale = Locale(identifier: "en_US_POSIX")
+  formatter.calendar = Calendar(identifier: .gregorian)
+  formatter.dateFormat = "yyyy-MM-dd"
+  return formatter
+}()
+
 func mergeAccountUsageBuckets(
   account: [CodexDailyUsageBucket],
   router: [ProviderDailyUsageBucket]
@@ -4544,6 +4470,43 @@ func mergeAccountUsageBuckets(
     )
   }
   return merged.values.sorted { $0.startDate < $1.startDate }
+}
+
+/// Pure chart projection. Safe to call from SwiftUI view bodies.
+func dailyUsagePoints(
+  from buckets: [DailyUsageDisplayBucket],
+  days: Int,
+  today: Date,
+  calendar: Calendar = .current
+) -> [DailyUsagePoint] {
+  let indexed = Dictionary(uniqueKeysWithValues: buckets.map { ($0.startDate, $0) })
+  return (0..<days).map { offset in
+    let date = calendar.date(byAdding: .day, value: offset - (days - 1), to: today) ?? today
+    let bucket = indexed[dailyUsageDayKeyFormatter.string(from: date)]
+    return DailyUsagePoint(
+      date: date,
+      tokens: Double(bucket?.tokens ?? 0),
+      isRouterFallback: bucket?.isRouterFallback ?? false
+    )
+  }
+}
+
+/// Pure 7/30-day total. Safe to call from SwiftUI view bodies.
+func sumLocalUsageTotals(
+  from buckets: [ProviderDailyUsageBucket],
+  days: Int,
+  today: Date,
+  calendar: Calendar = .current
+) -> (tokens: Double, requests: Int) {
+  let firstDay = calendar.date(byAdding: .day, value: -(days - 1), to: today) ?? today
+  return buckets.reduce(into: (tokens: 0.0, requests: 0)) { totals, bucket in
+    guard let date = dailyUsageDayKeyFormatter.date(from: bucket.startDate),
+          date >= firstDay,
+          date <= today
+    else { return }
+    totals.tokens += Double(bucket.tokens)
+    totals.requests += bucket.requests
+  }
 }
 
 struct RouterTarget: Decodable {

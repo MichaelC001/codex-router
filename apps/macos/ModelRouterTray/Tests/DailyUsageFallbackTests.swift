@@ -51,4 +51,58 @@ struct DailyUsageFallbackTests {
       RouterWidgetDailyPoint(date: fallbackDate, tokens: 0),
     ])
   }
+
+  @Test("dailyUsagePoints fills missing days and preserves fallback flags")
+  func dailyUsagePointsArePureProjection() {
+    let calendar = Calendar.current
+    let today = calendar.startOfDay(for: Date(timeIntervalSince1970: 1_777_500_000))
+    let dayMinus2 = calendar.date(byAdding: .day, value: -2, to: today)!
+    let keyToday = dailyUsageDayKeyFormatter.string(from: today)
+    let keyMinus2 = dailyUsageDayKeyFormatter.string(from: dayMinus2)
+    let points = dailyUsagePoints(
+      from: [
+        DailyUsageDisplayBucket(startDate: keyMinus2, tokens: 100, isRouterFallback: false),
+        DailyUsageDisplayBucket(startDate: keyToday, tokens: 280, isRouterFallback: true),
+      ],
+      days: 3,
+      today: today,
+      calendar: calendar
+    )
+
+    #expect(points.map(\.tokens) == [100, 0, 280])
+    #expect(points.map(\.isRouterFallback) == [false, false, true])
+  }
+
+  @Test("sumLocalUsageTotals ignores buckets outside the requested window")
+  func localUsageTotalsHonorDayWindow() {
+    let calendar = Calendar.current
+    let today = calendar.startOfDay(for: Date(timeIntervalSince1970: 1_777_500_000))
+    let dayMinus1 = calendar.date(byAdding: .day, value: -1, to: today)!
+    let dayMinus8 = calendar.date(byAdding: .day, value: -8, to: today)!
+    let totals = sumLocalUsageTotals(
+      from: [
+        ProviderDailyUsageBucket(
+          startDate: dailyUsageDayKeyFormatter.string(from: dayMinus8),
+          tokens: 9_999,
+          requests: 9
+        ),
+        ProviderDailyUsageBucket(
+          startDate: dailyUsageDayKeyFormatter.string(from: dayMinus1),
+          tokens: 100,
+          requests: 2
+        ),
+        ProviderDailyUsageBucket(
+          startDate: dailyUsageDayKeyFormatter.string(from: today),
+          tokens: 50,
+          requests: 1
+        ),
+      ],
+      days: 2,
+      today: today,
+      calendar: calendar
+    )
+
+    #expect(totals.tokens == 150)
+    #expect(totals.requests == 3)
+  }
 }
