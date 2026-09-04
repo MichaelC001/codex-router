@@ -370,8 +370,7 @@ test("the Windows launcher starts the wrapper hidden and propagates its exit cod
       ),
       `launcher did not embed the wrapper path correctly:\n${script}`,
     );
-    // Without this line Task Scheduler reads every crash as a clean exit and
-    // the RestartCount/RestartInterval settings never fire again.
+    // LastTaskResult still needs the real exit code for doctor/readiness.
     assert.match(script, /\r\nWScript\.Quit status\r\n$/);
     // A failure to even start the wrapper must also surface as a failure.
     assert.match(script, /\r\nIf Err\.Number <> 0 Then\r\n {2}WScript\.Quit 1\r\nEnd If\r\n/);
@@ -409,10 +408,27 @@ test("the Windows scheduled task runs the VBS launcher through wscript.exe", () 
   }
 });
 
-// The scheduled task's restart policy is the reason the exit code matters:
-// Task Scheduler only re-triggers RestartCount/RestartInterval when the action
-// reports a failure, so a launcher that swallowed the wrapper's exit code would
-// trade a console window for a router that stays dead after its first crash.
+test("Windows installTask registers a minute heartbeat beside logon", () => {
+  // RestartOnFailure does not relaunch after a started action exits (issue #581).
+  // The heartbeat trigger is the supervisor; IgnoreNew drops it while Running.
+  const source = readFileSync(path.join(root, "src", "service-windows.mjs"), "utf8");
+  const install = source.slice(
+    source.indexOf("function installTask()"),
+    source.indexOf("function waitForTaskToStop()"),
+  );
+  assert.match(install, /New-ScheduledTaskTrigger -AtLogOn/);
+  assert.match(
+    install,
+    /New-ScheduledTaskTrigger -Once -At \(Get-Date\) -RepetitionInterval \(New-TimeSpan -Minutes 1\)/,
+  );
+  assert.match(install, /-Trigger @\(\$logon, \$heartbeat\)/);
+  assert.match(install, /-MultipleInstances IgnoreNew -StartWhenAvailable/);
+});
+
+// Propagating the wrapper exit code keeps LastTaskResult honest for doctor
+// and readiness. It is not what relaunches a dead router: RestartOnFailure
+// only covers actions that fail to start (issue #581). The minute heartbeat
+// trigger in installTask() is the supervisor.
 // Nothing off Windows can execute a .vbs, so -- exactly like
 // `install.ps1 parses under powershell.exe` in test/installer-scripts.test.mjs --
 // this is the only place that link is executed rather than reasoned about.
