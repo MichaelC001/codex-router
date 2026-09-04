@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Startup prunes `enabled-providers.json` entries that cannot authenticate.**
+  Unknown ids (version skew) and recognised providers without a credential
+  were left in the selection file forever, so the dispatcher still treated
+  them as enabled and answered `provider_api_key_missing`. Startup now
+  rewrites the file to the configured subset (and deletes a file that named
+  only unknown ids, preserving the no-file show-all fallback). Idempotent;
+  discovery-disabled and show-all modes are left alone.
 - **macOS KeepAlive no longer uses launchd `Adaptive`, which starved startup.**
   Adaptive only boosts on XPC transactions; the router is localhost HTTP, so
   the job stayed at Background. Node OAuth/API forwarders then missed the 30s
