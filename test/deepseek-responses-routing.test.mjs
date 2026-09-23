@@ -270,6 +270,12 @@ test("direct DeepSeek Responses preserves images, reasoning, tools and stream bo
       response.writeHead(400, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: { type: "invalid_request_error", message: "reasoning.content must be a sequence of reasoning_text parts" } })); return;
     }
+    if (body.reasoning?.effort !== "none" && (body.tool_choice === "required" ||
+      (body.tool_choice?.type === "function" && typeof body.tool_choice.name === "string" && body.tool_choice.name) ||
+      body.tool_choice?.type === "custom")) {
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { type: "invalid_request_error", message: "Thinking mode does not support this tool_choice" } })); return;
+    }
     if (mode === "early-error") {
       response.writeHead(400, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: { type: "invalid_request_error", message: "fixture rejection" } })); return;
@@ -328,10 +334,59 @@ test("direct DeepSeek Responses preserves images, reasoning, tools and stream bo
     });
     assert.equal(rejectedString.status, 400, "the provider fixture must reject the shape rejected by the live API");
     await rejectedString.text();
+    const rejectedForcedChoice = await fetch(`http://127.0.0.1:${upstream.address().port}/responses`, {
+      method: "POST", body: JSON.stringify({ reasoning: { effort: "max" }, tools: [{ type: "function", name: "probe" }], tool_choice: "required" }),
+    });
+    assert.equal(rejectedForcedChoice.status, 400, "the fixture must reject forced tool choice in thinking mode");
+    await rejectedForcedChoice.text();
     await waitForListeners([
       { name: "api-forwarder /health", url: `http://127.0.0.1:${forwarderPort}/health`, headers: { Authorization: `Bearer ${INTERNAL_KEY}` } },
       { name: "router /models", url: `${base}/models` },
     ], { children, output });
+    for (const tool_choice of ["required", { type: "function", name: "fixture__probe" }]) {
+      const forced = await send("Use a tool.", { tool_choice });
+      assert.equal(forced.status, 200, String(output));
+      assertTranscript(parseEvents(await forced.text()));
+      assert.equal(requests.at(-1).body.tool_choice, undefined);
+      assert.ok(requests.at(-1).body.tools.some((tool) => tool.name === "fixture__probe"));
+      if (typeof tool_choice === "object") {
+        assert.deepEqual(requests.at(-1).body.tools.map((tool) => tool.name), ["fixture__probe"],
+          "a named choice must not expose unrelated tools after removing the unsupported forced choice");
+      }
+    }
+    const unknownNamed = await send("Reject an unknown named tool.", {
+      tool_choice: { type: "function", name: "missing_tool" },
+    });
+    assert.equal(unknownNamed.status, 400, "an unknown named choice must not become unrestricted tool access");
+    await unknownNamed.text();
+    const automatic = await send("Use a tool if useful.", { tool_choice: "auto" });
+    assert.equal(automatic.status, 200, String(output));
+    await automatic.text();
+    assert.equal(requests.at(-1).body.tool_choice, "auto");
+    const allowed = await send("Use only the allowed tool if useful.", {
+      tool_choice: { type: "allowed_tools", mode: "auto", tools: [{ type: "function", name: "fixture__probe" }] },
+    });
+    assert.equal(allowed.status, 200, String(output));
+    await allowed.text();
+    assert.deepEqual(requests.at(-1).body.tool_choice, {
+      type: "allowed_tools", mode: "auto", tools: [{ type: "function", name: "fixture__probe" }],
+    }, "restricted tool choices must not become unrestricted default auto");
+    const malformed = await send("Keep invalid tool choice visible to upstream validation.", {
+      tool_choice: { type: "function" },
+    });
+    assert.equal(malformed.status, 200, String(output));
+    await malformed.text();
+    assert.deepEqual(requests.at(-1).body.tool_choice, { type: "function" },
+      "malformed choices must not silently become unrestricted default auto");
+    const noTools = await send("Answer without tools.", { tool_choice: "none" });
+    assert.equal(noTools.status, 200, String(output));
+    await noTools.text();
+    assert.equal(requests.at(-1).body.tool_choice, "none");
+    const nonthinking = await send("Use a tool without thinking.", { reasoning: { effort: "none" }, tool_choice: "required" });
+    assert.equal(nonthinking.status, 200, String(output));
+    await nonthinking.text();
+    assert.equal(requests.at(-1).body.tool_choice, "required");
+    assert.deepEqual(requests.at(-1).body.reasoning, { effort: "none" });
     for (const imagePart of [undefined, { type: "input_image", image_url: IMAGE, detail: "original" }, { type: "input_image", file_id: "file-api-fixture" }]) {
       const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "Inspect the synthetic pixel." }, ...(imagePart ? [imagePart] : [])] }];
       const result = await send(input);
@@ -402,7 +457,7 @@ test("direct DeepSeek Responses preserves images, reasoning, tools and stream bo
     })).text());
     assertTranscript(bridged);
     assert.equal(requests.at(-1).body.tools[0].type, "function");
-    assert.equal(requests.at(-1).body.tool_choice.type, "function");
+    assert.equal(requests.at(-1).body.tool_choice, undefined);
     assert.equal(bridged.find((event) => event.type === "response.output_item.done" && event.item.type === "custom_tool_call").item.input, "synthetic raw input");
     mode = "namespaced-custom";
     for (const [namespace, collision] of [
@@ -427,7 +482,7 @@ test("direct DeepSeek Responses preserves images, reasoning, tools and stream bo
       if (collision) assert.notEqual(providerName, `${namespace}__exec`, "the plain function keeps its own identity");
       assert.equal(sent.input.find((item) => item.call_id === prior.call_id).name, providerName);
       assert.equal(sent.input.find((item) => item.call_id === prior.call_id).namespace, undefined);
-      assert.deepEqual(sent.tool_choice, { type: "function", name: providerName });
+      assert.equal(sent.tool_choice, undefined);
       for (const event of events) {
         for (const item of event.item ? [event.item] : event.response?.output || []) {
           if (item.type !== "custom_tool_call") continue;

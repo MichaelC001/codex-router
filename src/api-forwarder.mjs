@@ -1094,6 +1094,23 @@ function normalizeBody(buffer, contentType, route) {
       delete payload.thinking;
     }
     payload = normalizeOpenAIRequest(payload);
+    if (usesDeepSeekResponses(model) && payload.reasoning.effort !== "none" &&
+      (payload.tool_choice === "required" || (payload.tool_choice?.type === "function" &&
+        typeof payload.tool_choice.name === "string" && payload.tool_choice.name))) {
+      // Native DeepSeek Responses rejects forced tools while thinking. Omitting
+      // the choice leaves tools available under the upstream default. For a
+      // named choice, offer only that tool; an unknown name stays invalid.
+      // Preserve other choice forms, particularly allowed_tools restrictions.
+      if (payload.tool_choice === "required") {
+        delete payload.tool_choice;
+      } else {
+        const matches = payload.tools?.filter((tool) => tool.name === payload.tool_choice.name);
+        if (matches?.length === 1) {
+          payload.tools = matches;
+          delete payload.tool_choice;
+        }
+      }
+    }
     // The router labels routed assistant messages with Codex's `phase`, and
     // Codex replays it on every later turn. An operator-configured Responses
     // endpoint is an unknown validator, so it gets the pre-label history
