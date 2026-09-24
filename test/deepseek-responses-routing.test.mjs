@@ -270,8 +270,10 @@ test("direct DeepSeek Responses preserves images, reasoning, tools and stream bo
       response.writeHead(400, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: { type: "invalid_request_error", message: "reasoning.content must be a sequence of reasoning_text parts" } })); return;
     }
+    // Other custom tools are bridged to functions before reaching this fixture.
     if (body.reasoning?.effort !== "none" && (body.tool_choice === "required" ||
       (body.tool_choice?.type === "function" && typeof body.tool_choice.name === "string" && body.tool_choice.name) ||
+      (body.tool_choice?.type === "allowed_tools" && body.tool_choice.mode === "required") ||
       body.tool_choice?.type === "custom")) {
       response.writeHead(400, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: { type: "invalid_request_error", message: "Thinking mode does not support this tool_choice" } })); return;
@@ -339,6 +341,12 @@ test("direct DeepSeek Responses preserves images, reasoning, tools and stream bo
     });
     assert.equal(rejectedForcedChoice.status, 400, "the fixture must reject forced tool choice in thinking mode");
     await rejectedForcedChoice.text();
+    const rejectedRequiredAllowed = await fetch(`http://127.0.0.1:${upstream.address().port}/responses`, {
+      method: "POST", body: JSON.stringify({ reasoning: { effort: "max" }, tools: [{ type: "function", name: "probe" }],
+        tool_choice: { type: "allowed_tools", mode: "required", tools: [{ type: "function", name: "probe" }] } }),
+    });
+    assert.equal(rejectedRequiredAllowed.status, 400, "the fixture must reject required allowed_tools in thinking mode");
+    await rejectedRequiredAllowed.text();
     await waitForListeners([
       { name: "api-forwarder /health", url: `http://127.0.0.1:${forwarderPort}/health`, headers: { Authorization: `Bearer ${INTERNAL_KEY}` } },
       { name: "router /models", url: `${base}/models` },
@@ -371,6 +379,30 @@ test("direct DeepSeek Responses preserves images, reasoning, tools and stream bo
     assert.deepEqual(requests.at(-1).body.tool_choice, {
       type: "allowed_tools", mode: "auto", tools: [{ type: "function", name: "fixture__probe" }],
     }, "restricted tool choices must not become unrestricted default auto");
+    const requiredAllowed = await send("Use only the allowed tool.", {
+      tool_choice: { type: "allowed_tools", mode: "required", tools: [{ type: "function", name: "fixture__probe" }] },
+    });
+    assert.equal(requiredAllowed.status, 200, String(output));
+    await requiredAllowed.text();
+    assert.equal(requests.at(-1).body.tool_choice, undefined);
+    assert.deepEqual(requests.at(-1).body.tools.map((tool) => tool.name), ["fixture__probe"],
+      "dropping required must keep the allowed-tools restriction");
+    const unknownAllowed = await send("Reject an unknown allowed tool.", {
+      tool_choice: { type: "allowed_tools", mode: "required", tools: [{ type: "function", name: "missing_tool" }] },
+    });
+    assert.equal(unknownAllowed.status, 400, "unknown allowed tools must not widen tool access");
+    await unknownAllowed.text();
+    const duplicateDefinitions = await send("Reject an ambiguous allowed tool list.", {
+      tools: [
+        { type: "function", name: "duplicate", parameters: { type: "object", properties: {} } },
+        { type: "function", name: "duplicate", parameters: { type: "object", properties: {} } },
+      ],
+      tool_choice: { type: "allowed_tools", mode: "required", tools: [
+        { type: "function", name: "duplicate" }, { type: "function", name: "missing_tool" },
+      ] },
+    });
+    assert.equal(duplicateDefinitions.status, 400, "duplicate definitions cannot stand in for a missing allowed tool");
+    await duplicateDefinitions.text();
     const malformed = await send("Keep invalid tool choice visible to upstream validation.", {
       tool_choice: { type: "function" },
     });
