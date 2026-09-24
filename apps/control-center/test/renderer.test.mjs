@@ -90,6 +90,10 @@ const bridgeSource = String.raw`
     visible: false,
     multiAgentVersion: "v1",
     subagentCertification: "unknown",
+    // One route of a multi-route family is locally curated, so the fixture
+    // covers the discrimination the delete control depends on rather than a
+    // family where every route answers the same way.
+    ...(model.provider === "opencode-go" ? { local: true } : {}),
   }));
   const target = {
     target: "codex",
@@ -540,6 +544,12 @@ const bridgeSource = String.raw`
       operationListener = listener;
       return () => { if (operationListener === listener) operationListener = undefined; };
     },
+    // Not gated behind customEndpoints: a locally curated model can sit on any
+    // provider, which is the whole point of the removal being general.
+    removeLocalModels: async (slugs) => {
+      record("removeLocalModels", [...slugs]);
+      return { ok: true };
+    },
   });
 
   if (searchParams.get("customEndpoints") === "1") {
@@ -954,7 +964,9 @@ test("the production renderer exposes model discovery and picker actions", { tim
     // that would make it usable.
     assert.equal(await oxFamily.getByRole("button", { name: /^Connect / }).count(), 4);
     const columns = await oxFamily.locator(".pm-route-head > span").allTextContents();
-    assert.deepEqual(columns, ["Account", "Context", "Input", "In picker", "Subagents", "Reasoning effort"]);
+    // The fixture's opencode Go route is locally curated, so this family also
+    // carries the unlabelled remove column.
+    assert.deepEqual(columns, ["Account", "Context", "Input", "In picker", "Subagents", "Reasoning effort", ""]);
     await modelSearch.fill("");
 
     // Adding reads every connected provider's catalog at once. Only a provider
@@ -1274,6 +1286,75 @@ test("independent control-center reads reveal each ready page region", { timeout
     page.setDefaultTimeout(7_000);
     await page.locator(".pm-family-row").filter({ hasText: "DeepSeek Chat" }).waitFor();
     assert.deepEqual(pageErrors, [], `renderer errors: ${pageErrors.join("; ")}`);
+  } finally {
+    await browser.close();
+    await close();
+  }
+});
+
+test("only a locally curated route offers to be deleted, and only after confirmation", { timeout: 120_000 }, async () => {
+  assert.equal(existsSync(path.join(dist, "index.html")), true, "npm test must build the renderer first");
+  assert.ok(chromiumPath, "No Chromium executable is available for the Control Center renderer test.");
+
+  const { url, close } = await serveRenderer();
+  const browser = await chromium.launch({
+    executablePath: chromiumPath,
+    headless: true,
+    args: process.platform === "linux" ? ["--no-sandbox"] : [],
+  });
+  const pageErrors = [];
+  try {
+    const page = await newEnglishTestPage(browser, { viewport: { width: 1280, height: 840 } });
+    page.setDefaultTimeout(10_000);
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
+
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: "Models", exact: true }).click();
+    await page.getByRole("heading", { name: "Models", exact: true }).waitFor();
+
+    await page.locator('input[placeholder="Search models"]').fill("Ox Alpha");
+    const oxFamily = page.locator(".pm-family-row").filter({ hasText: "Ox Alpha" });
+    await oxFamily.locator(".pm-family-open").click();
+
+    // The locally curated route says so, and is the only one that can be
+    // deleted: every other route here is shipped by the checkout.
+    const localRoute = oxFamily.locator(".pm-route-row").filter({ hasText: "opencode Go/Zen" });
+    const shippedRoute = oxFamily.locator(".pm-route-row").filter({ hasText: "OpenCode Free" });
+    await localRoute.locator(".pm-route-local").waitFor();
+    assert.equal(await shippedRoute.locator(".pm-route-local").count(), 0);
+    assert.equal(await localRoute.locator(".pm-endpoint-model-remove").count(), 1);
+    assert.equal(
+      await shippedRoute.locator(".pm-endpoint-model-remove").count(),
+      0,
+      "a checked-in route must not offer a delete curation could not perform",
+    );
+
+    // Deleting is not undoable from here, so it is confirmed the way
+    // disconnecting a provider is -- and cancelling must call nothing.
+    await localRoute.locator(".pm-endpoint-model-remove").click();
+    await page.getByRole("heading", { name: "Delete local model", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.calls().some((call) => call.name === "removeLocalModels")),
+      false,
+      "cancelling the dialog must not delete anything",
+    );
+
+    await localRoute.locator(".pm-endpoint-model-remove").click();
+    await page.getByRole("heading", { name: "Delete local model", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Delete model", exact: true }).click();
+    await page.waitForFunction(() => window.routerControlTest.calls().some((call) => call.name === "removeLocalModels"));
+    // The router resolves the slug against the overlay, so the slug is the
+    // whole request: the renderer never derives an upstream id.
+    assert.deepEqual(
+      await page.evaluate(() => window.routerControlTest.calls().find((call) => call.name === "removeLocalModels").args),
+      [["opencode-go/ox-alpha"]],
+    );
+
+    assert.deepEqual(pageErrors, []);
   } finally {
     await browser.close();
     await close();

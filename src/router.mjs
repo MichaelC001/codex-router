@@ -66,8 +66,7 @@ import {
 import { moonshotSchemaRoute } from "./moonshot-schema-routes.mjs";
 import { reasoningTagStripperTransform } from "./reasoning-tag-stripper.mjs";
 import {
-  ZaiResponsesCompatTransform,
-  zaiResponsesCompatTransform,
+  messageEnvelopeCompatTransform,
 } from "./zai-responses-compat.mjs";
 import { reasoningSummaryCompatTransform } from "./grok-reasoning-summary-compat.mjs";
 import { earlyToolItemDoneTransform } from "./early-tool-item-done.mjs";
@@ -107,6 +106,7 @@ import { discoveryDisabled } from "./discovery-mode.mjs";
 import { readNativeAliases } from "./native-alias.mjs";
 import { nativeContextVariantBase } from "./native-context-variants.mjs";
 import { normalizeNativeReasoningEffort } from "./native-reasoning-effort.mjs";
+import { foldResponsesSse, nativeInputAsList } from "./native-buffered-response.mjs";
 import { readNativeRedirect } from "./native-redirect.mjs";
 import {
   autoReviewFallbackEngaged,
@@ -2261,7 +2261,6 @@ async function readVisionEvidence({ url, engine, nativeCall, effort, question, k
 // ordinary tool loop did not (#256).
 function carryReasoningThroughInput(input, {
   nativeThinking = false,
-  removeCarriedReasoning = false,
   dropReasoning = false,
 } = {}) {
   if (!Array.isArray(input) || input.length < 2) return;
@@ -2295,7 +2294,7 @@ function carryReasoningThroughInput(input, {
     } else if (text && next) {
       if (next.type === "function_call" || next.type === "custom_tool_call") {
         input[end - 1] = assistantTextItem(text, nativeThinking);
-        if (removeCarriedReasoning) removed = end - index - 1;
+        removed = end - index - 1;
       } else if (next.type === "message" && next.role === "assistant") {
         // Merged into the assistant message rather than inserted in front of
         // it. A separate message would put two assistant turns back to back,
@@ -2304,11 +2303,11 @@ function carryReasoningThroughInput(input, {
         // LiteLLM folds a following function_call into the assistant message
         // it already emitted.
         input[end] = mergeAssistantText(next, text, nativeThinking);
-        if (removeCarriedReasoning) removed = end - index;
+        removed = end - index;
       }
     }
-    // Native Responses providers retain their existing item semantics. On
-    // Chat routes remove only a run successfully carried onto an assistant;
+    // Only Chat routes reach this helper (#840). Remove only a run
+    // successfully carried onto an assistant (or deliberately dropped);
     // unrelated or trailing reasoning must not be silently discarded.
     if (removed) input.splice(index, removed);
     index = end - removed - 1;
@@ -3530,20 +3529,21 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   const input = deepSeekResponses
     ? deepSeekResponsesInput(bridged)
     : Array.isArray(bridged) ? [...bridged] : bridged;
-  // Legacy Chat routes retain their existing reasoning carry. The native
-  // DeepSeek route already has exactly one plaintext reasoning item and must
-  // not copy it into an assistant message for Chat translation.
-  if (!deepSeekResponses) {
-    // Three replay channels, not two. A Chat route inside the native-reasoning
-    // contract carries its thinking as `thinking` parts for the forwarder to
-    // restore as reasoning_content; a Chat route outside it drops the thinking
-    // rather than replaying it as visible prose (#755); a native Responses
-    // provider keeps its existing item semantics untouched.
-    const nativeChatReasoning = chatCompletionsProvider && usesNativeChatReasoning(route);
+  // Only Chat Completions routes carry reasoning. Two replay channels: a Chat
+  // route inside the native-reasoning contract carries its thinking as
+  // `thinking` parts for the forwarder to restore as reasoning_content; a Chat
+  // route outside it drops the thinking rather than replaying it as visible
+  // prose (#755). A native Responses provider -- DeepSeek's dedicated route
+  // and every `openai-responses` provider, generic ones included -- keeps its
+  // reasoning items exactly as sent. The carry is not a no-op with its flags
+  // off: it rewrote reasoning before a tool call into assistant `output_text`
+  // and copied reasoning before an answer into the visible message, which a
+  // thinking model reads as something it once said and loops on (#840).
+  if (chatCompletionsProvider && !deepSeekResponses) {
+    const nativeChatReasoning = usesNativeChatReasoning(route);
     carryReasoningThroughInput(input, {
       nativeThinking: nativeChatReasoning,
-      removeCarriedReasoning: chatCompletionsProvider,
-      dropReasoning: chatCompletionsProvider && !nativeChatReasoning,
+      dropReasoning: !nativeChatReasoning,
     });
   }
   // Models marked requiresTrailingUserTurn reject requests ending with a model
@@ -4154,6 +4154,7 @@ async function handleResponses(request, response, requestUrl) {
   let toolResultAging;
   let imageBudget;
   let pendingInterrupts = [];
+  let bufferNativeStream = false;
   let emptyCompletion = false;
   let emptyCompletionRetried = false;
   // The model the operator actually asked for, when this turn ended up being
@@ -4528,8 +4529,13 @@ async function handleResponses(request, response, requestUrl) {
       if (variantBase) native.model = variantBase;
       normalizeNativeEffortCompatibility(native);
       normalizeNativePromptCacheCompatibility(native);
-      if (Array.isArray(payload.input)) {
-        native.input = normalizeNativeInput(payload.input, {
+      // The backend answers a string `input` with a bare "Input must be a
+      // list" 400. Like the rest of the substituted-caller normalization, only
+      // a generic client's shorthand is rewritten, into the one user message
+      // it means (#862); a caller with its own credential is relayed as sent.
+      if (substitutedCaller) native.input = nativeInputAsList(native.input);
+      if (Array.isArray(native.input)) {
+        native.input = normalizeNativeInput(native.input, {
           // Every substituted caller needs provenance-safe full reasoning.
           // V1 compaction alone has a stored-reference contract, so it keeps
           // bare rs_ references while ordinary/V2 stateless replay drops them.
@@ -4561,6 +4567,14 @@ async function handleResponses(request, response, requestUrl) {
       if (!compactV1) delete native.previous_response_id;
       if (substitutedCaller) {
         normalizeNativeForSubstitutedCaller(native, { compact: compactV1 });
+        // The backend only streams ("Stream must be set to true"). A generic
+        // client that asked for one JSON object still gets one: ask for the
+        // stream and fold it below (#862). Compaction V1 is its own JSON
+        // endpoint and is left alone.
+        if (!compactV1 && native.stream !== true) {
+          native.stream = true;
+          bufferNativeStream = true;
+        }
       }
       target = nativeTarget(requestUrl.pathname);
       headers = nativeHeaders(request);
@@ -4806,6 +4820,23 @@ async function handleResponses(request, response, requestUrl) {
     // predicate is structural (this request, these bytes, an explicit zero),
     // so it cannot fire on a provider that reports correctly and it disables
     // itself the moment the upstream starts reporting again.
+    if (
+      bufferNativeStream &&
+      upstream.ok &&
+      /text\/event-stream/i.test(upstream.headers.get("content-type") || "")
+    ) {
+      const folded = foldResponsesSse(
+        (await readResponseBody(upstream, {
+          maxBytes: MAX_BUFFERED_RESPONSE_BYTES,
+          signal: controller.signal,
+        })).toString("utf8"),
+      );
+      upstream = new Response(JSON.stringify(folded.body), {
+        status: folded.status,
+        headers: { "content-type": "application/json" },
+      });
+      upstreamStatus = upstream.status;
+    }
     const upstreamContentType = upstream.headers.get("content-type") || "";
     const createResponsePipeline = (contentType, preludeMs = EMPTY_COMPLETION_PRELUDE_MS) => {
       const usageObserver = new ResponseUsageTransform(contentType, {
@@ -4820,18 +4851,14 @@ async function handleResponses(request, response, requestUrl) {
             : undefined,
       });
       const transforms = [activity.progress.byteObserver(), usageObserver];
-      let envelopeCompat = route
-        ? zaiResponsesCompatTransform(route.provider, contentType)
+      // LiteLLM's Chat Completions bridge can stream assistant text after a
+      // reasoning item with no message envelope, on the reasoning item's own
+      // output index (Z.ai GLM-5.3, OpenRouter MiMo). Codex logs every such
+      // delta as `OutputTextDelta without active item`. The factory refuses
+      // native traffic and providers that do not cross that bridge.
+      const envelopeCompat = route
+        ? messageEnvelopeCompatTransform(providerForModel(route), contentType)
         : undefined;
-      // Z.ai Responses streams from GLM-5.3 can start assistant text after
-      // reasoning without its message envelope. Keep that repair provider-scoped.
-      if (
-        !envelopeCompat &&
-        route?.provider === "zai-coding" &&
-        String(contentType).toLowerCase().includes("text/event-stream")
-      ) {
-        envelopeCompat = new ZaiResponsesCompatTransform();
-      }
       if (envelopeCompat) transforms.push(envelopeCompat);
       // LiteLLM's Chat Completions bridge streams reasoning under hashed
       // per-delta ids that Codex drops; rebuild one reasoning item. Grok OAuth

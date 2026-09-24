@@ -1,6 +1,26 @@
 # Changelog
 
 ## Unreleased
+- **A connect timeout is bounded now, and the retry that exists to absorb it is
+  finally reachable.** `upstream-retry.mjs` has always listed
+  `UND_ERR_CONNECT_TIMEOUT` as retryable, but its pre-retry budget was a fixed
+  5s while the socket was allowed undici's 10s default to connect: by the time
+  the failure arrived, the attempt had already spent the budget, so the retry
+  never started and the blip was relayed as a 502. One incident across two
+  machines (2026-09-21) logged 454 connect timeouts and *zero* connect retries,
+  each failure costing its caller 10.2s. The process-wide pool now carries an
+  explicit `connectTimeout` (3s; `CODEX_ROUTER_CONNECT_TIMEOUT_MS` to tune,
+  clamped 0.5-30s) and races the resolved addresses (`autoSelectFamily`, 250ms
+  per attempt) instead of serializing one dead anycast IP in front of a healthy
+  one, and `upstream-retry.mjs` derives its default budget from the same bound
+  (`3 x connectTimeout`, 9s by default) so the two cannot drift apart again.
+  The worst case for a request that does fail is unchanged at ~10s -- three
+  bounded attempts plus backoff, where one undici-default attempt used to be --
+  and a slow failure is still relayed untouched: the 504 an edge spends half a
+  minute producing is not retried. Measured against a blackholed address, a
+  connect failure is now detected at 3.5s instead of 10.0s.
+  (`CODEX_ROUTER_NATIVE_RETRIES`, `CODEX_ROUTER_NATIVE_RETRY_BACKOFF_MS` and
+  `CODEX_ROUTER_NATIVE_RETRY_BUDGET_MS` still tune the loop; `0` disables it.)
 - **An overloaded machine no longer makes the router kill a working LiteLLM
   gateway.** The liveness watchdog stopped the gateway after three missed 4 s
   probes, and it treated a probe that *timed out* the same as one that was
@@ -71,6 +91,29 @@
   the CLI listed it. Hidden entries are now published in a priority band after
   the last visible model; visible priorities, and therefore the picker order
   and the spawn_agent override window, are unchanged.
+- **OpenCode Free models that the provider will not serve to this router are no
+  longer offered.** OpenCode answers a free-tier request that did not come from
+  its own client with `FreeTierError: OpenCode's free tier can only be used from
+  within OpenCode`, so curating one produced a picker entry that failed on its
+  opening request. Probed 2026-09-23 against `https://opencode.ai/zen/v1` in the
+  shape the router uses -- no credential, the `x-opencode-session` header,
+  Chat Completions for the primary ids and Responses for the Muse pair --
+  `big-pickle`, `mimo-v2.5-free`, `mimo-v2.6-flash-free`,
+  `muse-spark-1.2-contributor-free`, `muse-spark-1.3-contributor-free`,
+  `nemotron-3-ultra-free`, and `nemotron-3.5-lightning-free` are all refused
+  that way; `deepseek-v4-flash-free` cleared the same gate on the same run and
+  stays addable, which is why the list is per id rather than a provider-wide
+  rule. Discovery now reports each gated id as blocked with that reason instead
+  of as a candidate, and `doctor` says so where it suggests curating the free
+  tier. An id already in an operator's configuration is untouched and still
+  resolves to its documented route.
+- **A locally curated model can now be deleted from the Control Center.**
+  Routes that came from the `user-models.json` overlay are tagged `Local` on
+  the Models page and carry a delete control that asks for confirmation; the
+  router resolves each slug against the overlay and runs
+  `curate-models PROVIDER --remove ... --apply`, so a checked-in route can
+  never be offered for deletion. `curate-models` also gains `--dry-run`,
+  which prints what a run would add or remove without writing anything.
 - **A long session's images can no longer cross the provider's ceiling and fail
   the whole turn.** A conversation replays every image it still holds on every
   following turn, so a session that views screenshots grows until one request
@@ -297,6 +340,15 @@
   all of this; its `unaccountedLines` helper moves to `yaml-structure.mjs` and
   both managers now share it. Anything this reader cannot account for is
   refused with the file untouched and the offending line named.
+- **The bundled `codex-router` skill no longer documents the subagent model
+  pinning the router stopped doing.** An explicit `spawn_agent.model` is kept;
+  only a call that omits the model inherits the routed parent. That shipped as
+  a code change, a `.claude/skills/codex-subagents` rewrite and a
+  `docs/HOW-IT-WORKS.md` update, but `skills/codex-router/SKILL.md` -- the copy
+  installed into every user's `~/.codex/skills` -- still told its reader that
+  in-session subagents are always pinned to the parent, and so did the comment
+  above `SPAWN_MODEL_TOOLS`. Both are corrected, and a source assertion now
+  fails on the stale claim so the next drift is not silent.
 - **An apostrophe in a harness config no longer moves the router's route into
   somebody else's value.** `yaml-structure.mjs` treated every `'` and `"` as a
   quoting indicator, but YAML only gives a quote that meaning where a node can

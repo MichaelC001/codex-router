@@ -511,7 +511,7 @@ async function emitProbeSet(provider, desired) {
 async function routerCatalogSnapshot() {
   const { canonicalProviderId, readProviderSelection, selectedConfiguredListedModels } =
     await import("./provider-selection.mjs");
-  const { CHECKED_IN_MODELS } = await import("./model-registry.mjs");
+  const { CHECKED_IN_MODELS, LOCAL_MODEL_SLUGS } = await import("./model-registry.mjs");
   const { modelPickerSnapshot } = await import("./model-picker-state.mjs");
   const { subagentSettingsSnapshot } = await import("./multi-agent-state.mjs");
   const { applySubagentProofs } = await import("./subagent-proofs.mjs");
@@ -534,6 +534,10 @@ async function routerCatalogSnapshot() {
     subagentCertification: subagentCertification(model),
     visible: picker.hasExplicitVisibility ? visible.has(model.slug) : !hidden.has(model.slug),
     isFree: model.isFree === true,
+    // Locally curated, so curation can prune it again. Absent on every route
+    // this checkout ships, which is what stops a desktop delete control from
+    // offering to remove something no overlay write could take away.
+    ...(LOCAL_MODEL_SLUGS.has(model.slug) ? { local: true } : {}),
     ...(Number.isFinite(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
     ...(Array.isArray(model.inputModalities) ? { inputModalities: model.inputModalities } : {}),
     ...reasoningLevelField(model.reasoningLevels),

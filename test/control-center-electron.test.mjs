@@ -1324,6 +1324,7 @@ test("preload exposes only the named control operations", async () => {
     "setProviderEnabled",
     "discoverProviderModels",
     "addProviderModels",
+    "removeLocalModels",
     "connectProvider",
     "saveProviderCredential",
     "setSubagentEffort",
@@ -1385,6 +1386,7 @@ test("preload constructs exact positional IPC payloads", async () => {
     ["connectProvider", ["provider"], { providerId: "provider" }],
     ["saveProviderCredential", ["provider", "credential"], { providerId: "provider", credential: "credential" }],
     ["removeProviderCredential", ["provider"], { providerId: "provider" }],
+    ["removeLocalModels", [["provider/model-a"]], { slugs: ["provider/model-a"] }],
     ["setSubagentMode", ["proven"], { mode: "proven" }],
     ["setSubagentModel", ["model", true], { slug: "model", enabled: true }],
     ["setSubagentEffort", ["model", "xhigh"], { slug: "model", effort: "xhigh" }],
@@ -2178,6 +2180,23 @@ test("provider writes republish all installed targets and roll selection back on
   assert.ok(add, "model-add handler should be readable");
   assert.match(add, /\[id, "--models", unique\.join\(","\), "--refresh", "--apply"\]/);
   assert.match(add, /CATALOG_MUTATION_TIMEOUT_MS/);
+
+  // Adding accepts any catalog provider, so removal has to reach the same set
+  // or a curated model can be published and never taken back. The overlay
+  // supplies the upstream id, because an ordinary provider's public slug does
+  // not encode it the way a custom endpoint's does.
+  const removeLocal = source.match(/handleAction\("removeLocalModels"[\s\S]*?\n  \}\);/)?.[0];
+  assert.ok(removeLocal, "local-model removal handler should be readable");
+  assert.match(removeLocal, /readUserModels/);
+  assert.match(removeLocal, /curationPrimaryProviderId/);
+  assert.match(removeLocal, /\[primary, "--remove", \[\.\.\.new Set\(upstream\)\]\.join\(","\), "--apply"\]/);
+  assert.match(removeLocal, /CATALOG_MUTATION_TIMEOUT_MS/);
+  // The overlay is the whole authority: without this a checked-in route could
+  // be "removed" and simply reappear on the next publication.
+  assert.match(removeLocal, /is not a locally curated model/);
+  // --remove takes a comma-separated list, so an id carrying one would name
+  // models the operator never selected.
+  assert.match(removeLocal, /upstream\.includes\(","\)/);
 
   // Replacing a credential can mean a different account with a different
   // entitlement, so neither save nor removal may leave the old list behind.

@@ -4,6 +4,7 @@ import {
   usesNativeChatReasoning,
 } from "./chat-reasoning.mjs";
 import {
+  createReasoningReplayJsonTap,
   createReasoningReplayTap,
   reasoningForToolCalls,
   toolCallIdsOf,
@@ -1360,7 +1361,11 @@ function normalizeBody(buffer, contentType, route) {
     delete payload.temperature;
     delete payload.top_p;
   } else if (model.requestProfile === "xai-reasoning") {
-    if (!["low", "medium", "high"].includes(payload.reasoning_effort)) {
+    // The accepted rungs belong to the model: grok-4.5 stops at high, while
+    // grok-4.7 documents xhigh and publishes it, so it must not be clamped.
+    const accepted = ["low", "medium", "high"];
+    if (model.reasoningLevels?.some((level) => level?.effort === "xhigh")) accepted.push("xhigh");
+    if (!accepted.includes(payload.reasoning_effort)) {
       payload.reasoning_effort = "high";
     }
     delete payload.presence_penalty;
@@ -1590,6 +1595,8 @@ async function relayUpstreamResponse(
     upstream.ok && upstreamContentType.toLowerCase().includes("text/event-stream");
   const responsesJson = normalized.responseAdapter === "responses" &&
     upstream.ok && upstreamContentType.toLowerCase().includes("application/json");
+  const replayJson = requiresReasoningContentOnToolCalls(normalized.model) && upstream.ok &&
+    upstreamContentType.toLowerCase().includes("application/json");
   
   // Direct DeepSeek calls arrive with an outer, authoritative namespace/custom
   // map. Preserve their wire names here; guessing a namespace from a flattened
@@ -1607,6 +1614,7 @@ async function relayUpstreamResponse(
     upstreamContentType.toLowerCase().includes("text/event-stream")
       ? createReasoningReplayTap()
       : undefined,
+    replayJson ? createReasoningReplayJsonTap() : undefined,
     responsesStream
       ? createResponsesStreamTransform(flatToNative, {
           pinResponseId: normalized.provider.authProfile === "github-copilot",
@@ -1620,6 +1628,7 @@ async function relayUpstreamResponse(
     : undefined;
   if (responsesStream) response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   if (responsesJson) response.setHeader("Content-Type", "application/json; charset=utf-8");
+  if (replayJson && !responsesJson) response.setHeader("Content-Type", upstreamContentType);
   await pipeResponse(upstream, response, denylist, transform);
   recordUpstreamLimits(normalized, telemetryUpstream);
   if (!QUIET) {
