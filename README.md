@@ -1958,6 +1958,14 @@ failure. Choose the order yourself, or hand the choice back:
 ./bin/control failover auto
 ```
 
+**A route you only ever want to pick yourself can opt out.** Set
+`"failoverCandidate": false` on its entry in `user-models.json` and it stays in
+the picker and answers when you select it, but it is never chosen
+automatically -- not by quota failover, not by compaction, and not through a
+named chain. Use it for a slow, best-effort or subscription-bound route that
+must not absorb other models' traffic. Curation keeps the field on an existing
+entry; a model without it behaves exactly as before.
+
 **When a provider tells you when it will be back, that is believed.** The next
 turn skips it outright instead of paying for the same rejection again, and it
 starts being used the moment the window passes — or the next time it answers
