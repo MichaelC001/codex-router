@@ -1094,6 +1094,37 @@ function normalizeBody(buffer, contentType, route) {
       delete payload.thinking;
     }
     payload = normalizeOpenAIRequest(payload);
+    if (usesDeepSeekResponses(model) && payload.reasoning.effort !== "none" &&
+      (payload.tool_choice === "required" || (payload.tool_choice?.type === "function" &&
+        typeof payload.tool_choice.name === "string" && payload.tool_choice.name) ||
+        (payload.tool_choice?.type === "allowed_tools" && payload.tool_choice.mode === "required"))) {
+      // Native DeepSeek Responses rejects forced tools while thinking. Omitting
+      // the choice leaves tools available under the upstream default. For a
+      // named or required allowed-tools choice, offer only those tools. Leave
+      // unknown or malformed restrictions invalid rather than widening access.
+      if (payload.tool_choice === "required") {
+        delete payload.tool_choice;
+      } else if (payload.tool_choice.type === "function") {
+        const matches = payload.tools?.filter((tool) => tool.name === payload.tool_choice.name);
+        if (matches?.length === 1) {
+          payload.tools = matches;
+          delete payload.tool_choice;
+        }
+      } else {
+        const allowed = payload.tool_choice.tools;
+        if (Array.isArray(allowed) && allowed.length > 0 &&
+          allowed.every((tool) => ["function", "custom"].includes(tool?.type) &&
+            typeof tool.name === "string" && tool.name)) {
+          const keys = new Set(allowed.map((tool) => `${tool.type}\0${tool.name}`));
+          const matches = allowed.map((choice) => payload.tools?.filter((tool) =>
+            tool.type === choice.type && tool.name === choice.name));
+          if (keys.size === allowed.length && matches.every((group) => group?.length === 1)) {
+            payload.tools = matches.map((group) => group[0]);
+            delete payload.tool_choice;
+          }
+        }
+      }
+    }
     // The router labels routed assistant messages with Codex's `phase`, and
     // Codex replays it on every later turn. An operator-configured Responses
     // endpoint is an unknown validator, so it gets the pre-label history
