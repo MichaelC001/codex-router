@@ -1480,6 +1480,17 @@ test("direct Meta Muse Spark 1.3 Contributor flattens recursive tool schemas", (
   assert.equal(verified.toolSchemaRecursion, "flatten");
 });
 
+test("OpenRouter Muse Spark 1.3 Contributor alone opts into recursive-schema repair", () => {
+  const verified = MODELS.find(model => model.slug === "openrouter/muse-spark-1.3-contributor");
+  assert.ok(verified);
+  assert.equal(verified.toolSchemaRecursion, "flatten");
+  for (const slug of ["openrouter/muse-spark-1.3", "openrouter/muse-spark-1.2-contributor"]) {
+    const control = MODELS.find(model => model.slug === slug);
+    assert.ok(control);
+    assert.equal(control.toolSchemaRecursion, undefined);
+  }
+});
+
 test("curated OpenCode Free Muse overlay upgrades text-only image modalities", async () => {
   // An entry curated before modalities were documented keeps ["text"]. The
   // registry overlay must widen it on load the same way it applies isFree and
