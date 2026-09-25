@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -31,7 +31,7 @@ function loadUserModel(extra) {
   };
   writeFileSync(path.join(stateDir, "user-models.json"), JSON.stringify({ version: 1, models: [entry] }));
   const script = `
-    const reg = await import(${JSON.stringify(path.join(root, "src/model-registry.mjs"))});
+    const reg = await import(${JSON.stringify(pathToFileURL(path.join(root, "src/model-registry.mjs")).href)});
     const model = reg.MODELS.find((m) => m.slug === ${JSON.stringify(entry.slug)});
     console.log(JSON.stringify({
       loaded: Boolean(model),
