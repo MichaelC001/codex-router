@@ -80,7 +80,7 @@ test("OpenCode Go discovery blocks live ids whose protocol route is not certifie
     assert.ok(result.registered.includes("glm-5"));
     assert.match(
       result.blocked["future-responses-only-model"],
-      /provider catalog lists future-responses-only-model.*has not verified whether the model uses Chat, Messages, or Responses.*router compatibility limitation.*future update/s,
+      /provider catalog lists future-responses-only-model.*has not verified whether the model uses Chat, Messages, Responses, or Gemini.*router compatibility limitation.*future update/s,
     );
   } finally {
     rmSync(testRoot, { recursive: true, force: true });

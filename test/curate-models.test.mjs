@@ -133,9 +133,26 @@ test("OpenCode curation keeps each endpoint family on its documented protocol", 
     /Google's native protocol/,
   );
   assert.equal(curatedModelBlockReason("opencode-go", "grok-4.5"), undefined);
+  assert.equal(curatedModelBlockReason("opencode-go", "gemini-4-argon-contributor"), undefined);
+  assert.equal(
+    curatedModelProviderId("opencode-go", "gemini-4-argon-contributor"),
+    "opencode-go",
+  );
+  assert.equal(
+    curatedModelContextLength("opencode-go", "gemini-4-argon-contributor"),
+    1_048_576,
+  );
+  assert.deepEqual(
+    curatedModelInputModalities("opencode-go", "gemini-4-argon-contributor"),
+    ["text", "image"],
+  );
+  assert.deepEqual(
+    curatedModelReasoningLevels("opencode-go", "gemini-4-argon-contributor"),
+    ["low", "medium", "high"],
+  );
   assert.match(
     curatedModelBlockReason("opencode-go", "future-responses-only-model"),
-    /provider catalog lists future-responses-only-model.*has not verified whether the model uses Chat, Messages, or Responses.*router compatibility limitation.*future update/s,
+    /provider catalog lists future-responses-only-model.*has not verified whether the model uses Chat, Messages, Responses, or Gemini.*router compatibility limitation.*future update/s,
   );
   assert.throws(
     () => curatedModelProviderId("opencode-go", "future-responses-only-model"),

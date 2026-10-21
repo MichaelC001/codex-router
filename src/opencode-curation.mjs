@@ -1,3 +1,5 @@
+import { OPENCODE_GEMINI_MODEL } from "./opencode-gemini.mjs";
+
 // OpenCode's anonymous catalog exposes documented free models on Chat
 // Completions and one on Responses. Keep this mapping deliberately separate
 // from paid Zen and the Go subscription family: those providers have different
@@ -277,7 +279,7 @@ const CURATION_ROUTES = Object.freeze({
       "opencode-go-messages",
       "opencode-go-responses",
     ]),
-    protocols: Object.freeze(["Chat", "Messages", "Responses"]),
+    protocols: Object.freeze(["Chat", "Messages", "Responses", "Gemini"]),
     messagesProvider: "opencode-go-messages",
     messagesModels: Object.freeze([
       "minimax-m2.5",
@@ -297,6 +299,9 @@ const CURATION_ROUTES = Object.freeze({
       "grok-4.7",
       "muse-spark-1.2-contributor",
       "muse-spark-1.3-contributor",
+    ]),
+    geminiModels: Object.freeze([
+      OPENCODE_GEMINI_MODEL,
     ]),
     primaryModels: Object.freeze([
       "deepseek-v4-flash",
@@ -323,7 +328,23 @@ const CURATION_ROUTES = Object.freeze({
       "step-5-preview-free",
       "x-preview-f",
     ]),
-    models: Object.freeze({}),
+    models: Object.freeze({
+      [OPENCODE_GEMINI_MODEL]: Object.freeze({
+        contextWindow: 1_048_576,
+        outputLimit: 65_536,
+        reasoningLevels: Object.freeze(["low", "medium", "high"]),
+        inputModalities: Object.freeze(["text", "image"]),
+        displayName: "Gemini 4 Argon Contributor (OpenCode Go)",
+        summary:
+          "Gemini 4 Argon Contributor through OpenCode Go's native Gemini endpoint.",
+        contextNote:
+          "The 1,048,576-token window and 65,536-token output limit are OpenCode's " +
+          "published Go model metadata for this exact model.",
+        reasoningNote:
+          "The low/medium/high ladder is OpenCode's published thinking-level mapping " +
+          "for this exact model.",
+      }),
+    }),
   }),
   "opencode-free": Object.freeze({
     providers: Object.freeze(["opencode-free", "opencode-free-responses"]),
@@ -422,6 +443,7 @@ function curatedModelRouteSelection(providerId, upstreamModel, { existingProvide
   if (route?.messagesModels?.includes(upstreamModel)) {
     return { providerId: route.messagesProvider };
   }
+  if (route?.geminiModels?.includes(upstreamModel)) return { providerId: primary };
   if (route?.primaryModels?.includes(upstreamModel)) return { providerId: primary };
   if (route?.providers.length > 1) {
     // Preserve a route the operator already chose, but never invent a protocol
