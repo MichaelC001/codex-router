@@ -27,6 +27,7 @@ import { runtimeDependencyRequirements } from "./runtime-dependency-requirements
 import { antigravityOAuthStartupState } from "./antigravity-oauth-status.mjs";
 import { attemptAntigravityProbePromotionAfterReadiness } from "./antigravity-probe-activation.mjs";
 import { spawnableCommand } from "./spawnable-command.mjs";
+import { awaitChildExits } from "./bounded-teardown.mjs";
 import { ensureOllamaHeadless } from "./ollama-runtime.mjs";
 import { venvRuntimeOutcome } from "./venv-runtime.mjs";
 import { dependencyRepairHint } from "./dependency-repair.mjs";
@@ -331,6 +332,8 @@ function waitForHealth(label, url, headers = {}, timeoutMs = 30_000, expectedSer
 // the restart it was. Derive the deadline from the drain so the two cannot
 // drift apart; the margin covers the exit itself.
 const SIGKILL_AFTER_MS = SHUTDOWN_DRAIN_MS + SHUTDOWN_FLUSH_MS + 2_000;
+const TEARDOWN_EXIT_GRACE_MS = 5_000;
+let childrenDrained = true;
 
 function stopChildren() {
   if (shuttingDown) return;
@@ -633,7 +636,12 @@ try {
   }
 } finally {
   stopChildren();
-  await Promise.all(children.map((child) => waitForExit(child, "child")));
+  // SIGKILL goes out at SIGKILL_AFTER_MS; a child that still has not reported
+  // its exit some seconds later never will, so stop waiting for it.
+  childrenDrained = await awaitChildExits(
+    children.map((child) => waitForExit(child, "child")),
+    { timeoutMs: SIGKILL_AFTER_MS + TEARDOWN_EXIT_GRACE_MS },
+  );
   if (serviceProcessRecorded) {
     try {
       clearServiceProcessState();
@@ -648,3 +656,9 @@ try {
 // async-handle close path and can abort with UV_HANDLE_CLOSING after a child
 // fails during startup (for example, an EADDRINUSE forwarder).
 process.exitCode = exitCode;
+if (!childrenDrained) {
+  console.error(
+    "[model-router] a child process never reported its exit after shutdown; exiting so the service manager can restart the router.",
+  );
+  process.exit(exitCode || 1);
+}
