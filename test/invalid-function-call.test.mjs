@@ -10,6 +10,9 @@ import {
   findUnusableCompletedFunctionCall,
   findUnusableFunctionCallArguments,
   functionCallArgumentsAreJson,
+  functionToolInventory,
+  omitUnexecutedEmptyArgumentCalls,
+  toolTakesNoInputs,
   historyFunctionCallArgumentsError,
   isLocalToolArgumentConversionFailure,
   localToolArgumentConversionError,
@@ -312,4 +315,169 @@ test("a non-streaming completed response with unterminated arguments is refused"
   );
   assert.equal(error.code, INVALID_FUNCTION_CALL_ARGUMENTS_CODE);
   assert.equal(output.length, 0);
+});
+
+const EXEC_TOOL = {
+  type: "function",
+  name: "exec_command",
+  parameters: {
+    type: "object",
+    properties: { cmd: { type: "string" } },
+    required: ["cmd"],
+  },
+};
+const NO_INPUT_TOOL = {
+  type: "function",
+  name: "list_mcp_resources_now",
+  parameters: { type: "object", properties: {} },
+};
+const NAMESPACE_TOOL = {
+  type: "namespace",
+  name: "mcp__clock__",
+  tools: [
+    { type: "function", name: "now", parameters: { type: "object", properties: {}, required: [] } },
+    { type: "function", name: "convert", parameters: { type: "object", properties: { tz: { type: "string" } } } },
+  ],
+};
+const PARSE_EOF = "failed to parse function arguments: EOF while parsing a value at line 1 column 0";
+
+function emptyArgumentStream(item) {
+  const added = sse({ type: "response.output_item.added", item: { ...item, arguments: "" } });
+  const done = sse({
+    type: "response.function_call_arguments.done",
+    item_id: item.id,
+    call_id: item.call_id,
+    arguments: "",
+  });
+  const closed = sse({ type: "response.output_item.done", item: { ...item, arguments: "" } });
+  return [Buffer.from(added + done + closed, "utf8")];
+}
+
+test("toolTakesNoInputs accepts only schemas without inputs", () => {
+  assert.equal(toolTakesNoInputs(undefined), true);
+  assert.equal(toolTakesNoInputs({ type: "object" }), true);
+  assert.equal(toolTakesNoInputs({ type: "object", properties: {}, required: [] }), true);
+  assert.equal(toolTakesNoInputs(EXEC_TOOL.parameters), false);
+  assert.equal(toolTakesNoInputs({ type: "object", properties: { a: { type: "string" } } }), false);
+  assert.equal(toolTakesNoInputs({ type: "object", anyOf: [{ required: ["a"] }] }), false);
+  assert.equal(toolTakesNoInputs({ type: "string" }), false);
+});
+
+test("functionToolInventory reads declared, namespaced, and tool_search tools", () => {
+  const inventory = functionToolInventory([EXEC_TOOL, NO_INPUT_TOOL, NAMESPACE_TOOL], [
+    { type: "tool_search_output", tools: [{ type: "function", name: "loaded_ping" }] },
+  ]);
+  assert.equal(inventory.get("\u0000exec_command"), false);
+  assert.equal(inventory.get("\u0000list_mcp_resources_now"), true);
+  assert.equal(inventory.get("mcp__clock__\u0000now"), true);
+  assert.equal(inventory.get("mcp__clock__\u0000convert"), false);
+  assert.equal(inventory.get("\u0000mcp__clock____now"), true);
+  assert.equal(inventory.get("\u0000loaded_ping"), true);
+});
+
+test("completed empty arguments are refused for a tool that takes inputs (#1066)", async () => {
+  const tools = functionToolInventory([EXEC_TOOL]);
+  const { output, error } = await collectUntilError(
+    new InvalidCompletedFunctionCallTransform(undefined, true, tools),
+    emptyArgumentStream({ type: "function_call", id: "fc_e", call_id: "call_e", name: "exec_command" }),
+  );
+  assert.equal(error.code, INVALID_FUNCTION_CALL_ARGUMENTS_CODE);
+  assert.match(error.message, /exec_command/);
+  const text = output.toString("utf8");
+  assert.doesNotMatch(text, /output_item\.done/);
+  assert.doesNotMatch(text, /function_call_arguments\.done/);
+});
+
+test("whitespace-only arguments count as empty", () => {
+  const tools = functionToolInventory([EXEC_TOOL]);
+  const found = findUnusableCompletedFunctionCall({
+    type: "response.output_item.done",
+    item: { type: "function_call", call_id: "c", name: "exec_command", arguments: "  \n" },
+  }, { tools });
+  assert.ok(found);
+});
+
+test("completed empty arguments are refused for a tool nobody declared", () => {
+  const tools = functionToolInventory([EXEC_TOOL]);
+  assert.ok(findUnusableCompletedFunctionCall({
+    type: "response.output_item.done",
+    item: { type: "function_call", call_id: "c", name: "imagined_tool", arguments: "" },
+  }, { tools }));
+});
+
+test("empty arguments stay valid for a no-input tool, flat or namespaced", async () => {
+  const tools = functionToolInventory([EXEC_TOOL, NO_INPUT_TOOL, NAMESPACE_TOOL]);
+  for (const item of [
+    { type: "function_call", id: "fc_a", call_id: "call_a", name: "list_mcp_resources_now" },
+    { type: "function_call", id: "fc_b", call_id: "call_b", name: "now", namespace: "mcp__clock__" },
+  ]) {
+    const chunks = emptyArgumentStream(item);
+    const output = await collect(new InvalidCompletedFunctionCallTransform(undefined, true, tools), chunks);
+    assert.equal(Buffer.concat([].concat(output)).toString("utf8"), chunks[0].toString("utf8"));
+  }
+  assert.ok(findUnusableCompletedFunctionCall({
+    type: "response.output_item.done",
+    item: { type: "function_call", call_id: "c", name: "convert", namespace: "mcp__clock__", arguments: "" },
+  }, { tools }));
+});
+
+test("the opening frame and in-progress snapshots may carry empty arguments", () => {
+  const tools = functionToolInventory([EXEC_TOOL]);
+  const item = { type: "function_call", call_id: "c", name: "exec_command", arguments: "" };
+  assert.equal(findUnusableCompletedFunctionCall({ type: "response.output_item.added", item }, { tools }), undefined);
+  assert.equal(findUnusableCompletedFunctionCall({
+    type: "response.in_progress",
+    response: { output: [item] },
+  }, { tools }), undefined);
+  assert.ok(findUnusableCompletedFunctionCall({
+    type: "response.completed",
+    response: { output: [{ ...item, status: "completed" }] },
+  }, { tools }));
+});
+
+test("a non-streaming response with empty arguments for an input tool is refused", async () => {
+  const tools = functionToolInventory([EXEC_TOOL]);
+  const body = JSON.stringify({
+    status: "completed",
+    output: [{ type: "function_call", call_id: "c", name: "exec_command", arguments: "" }],
+  });
+  const { error } = await collectUntilError(
+    new InvalidCompletedFunctionCallTransform(undefined, false, tools),
+    [Buffer.from(body)],
+  );
+  assert.equal(error.code, INVALID_FUNCTION_CALL_ARGUMENTS_CODE);
+});
+
+test("history refuses empty arguments only for a tool known to take inputs", () => {
+  const tools = functionToolInventory([EXEC_TOOL, NO_INPUT_TOOL]);
+  const found = findUnusableFunctionCallArguments([
+    { type: "function_call", call_id: "c1", name: "exec_command", arguments: "" },
+    { type: "function_call_output", call_id: "c1", output: "something else" },
+  ], { tools });
+  assert.equal(found?.toolName, "exec_command");
+  assert.equal(findUnusableFunctionCallArguments([
+    { type: "function_call", call_id: "c2", name: "list_mcp_resources_now", arguments: "" },
+    { type: "function_call", call_id: "c3", name: "removed_since", arguments: "" },
+  ], { tools }), undefined);
+});
+
+test("omitUnexecutedEmptyArgumentCalls drops only the poisoned pair", () => {
+  const keep = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    { type: "function_call", call_id: "ok", name: "exec_command", arguments: VALID },
+    { type: "function_call_output", call_id: "ok", output: "done" },
+    { type: "function_call", call_id: "other", name: "exec_command", arguments: "" },
+    { type: "function_call_output", call_id: "other", output: "real tool output" },
+  ];
+  const poisoned = [
+    { type: "function_call", call_id: "bad", name: "exec_command", arguments: "" },
+    { type: "function_call_output", call_id: "bad", output: PARSE_EOF },
+    { type: "function_call", call_id: "bad2", name: "exec_command", arguments: "" },
+    { type: "function_call_output", call_id: "bad2", output: [{ type: "input_text", text: PARSE_EOF }] },
+  ];
+  const result = omitUnexecutedEmptyArgumentCalls([...keep, ...poisoned]);
+  assert.equal(result.omitted, 2);
+  assert.deepEqual(result.input, keep);
+  const untouched = [...keep];
+  assert.equal(omitUnexecutedEmptyArgumentCalls(untouched).input, untouched);
 });
