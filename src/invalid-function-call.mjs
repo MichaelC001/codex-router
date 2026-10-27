@@ -1,6 +1,6 @@
 import { Transform } from "node:stream";
 
-import { buildNamespaceLookups } from "./namespace-relay.mjs";
+import { NAMESPACE_DELIMITER, buildNamespaceLookups } from "./namespace-relay.mjs";
 
 // A completed `function_call` whose arguments are not JSON is unusable: Codex
 // cannot execute it, stores it, and every later turn on that thread then fails
@@ -53,6 +53,124 @@ export function functionCallArgumentsAreJson(value, { allowEmpty = true } = {}) 
   }
 }
 
+// An empty argument string is how a model calls a tool that takes no inputs
+// (MCP tools without parameters send exactly that), so it stays legal there.
+// For every other tool a *completed* call with empty arguments is as unusable
+// as truncated JSON: Codex fails to parse it, stores the pair, and each later
+// turn is rejected (#1066). Opening and partial frames may still be empty.
+function blankArguments(value) {
+  return typeof value === "string" && value.trim() === "";
+}
+
+export function toolTakesNoInputs(parameters) {
+  if (parameters === undefined || parameters === null) return true;
+  if (typeof parameters !== "object" || Array.isArray(parameters)) return false;
+  if (parameters.type !== undefined && parameters.type !== "object") return false;
+  for (const key of ["anyOf", "oneOf", "allOf", "patternProperties"]) {
+    if (parameters[key] !== undefined) return false;
+  }
+  const properties = parameters.properties;
+  if (properties !== undefined && (typeof properties !== "object" || properties === null ||
+    Object.keys(properties).length > 0)) return false;
+  if (Array.isArray(parameters.required) && parameters.required.length > 0) return false;
+  return true;
+}
+
+function toolKey(namespace, name) {
+  return `${typeof namespace === "string" ? namespace : ""}\u0000${name}`;
+}
+
+function collectToolInventory(tools, inventory, namespace) {
+  if (!Array.isArray(tools)) return;
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object") continue;
+    if (tool.type === "namespace" && typeof tool.name === "string" && Array.isArray(tool.tools)) {
+      collectToolInventory(tool.tools, inventory, tool.name);
+      continue;
+    }
+    const name = typeof tool.name === "string" && tool.name
+      ? tool.name
+      : typeof tool.function?.name === "string" ? tool.function.name : undefined;
+    if (!name || (tool.type !== undefined && tool.type !== "function")) continue;
+    const noInputs = toolTakesNoInputs(tool.parameters ?? tool.function?.parameters);
+    const spellings = namespace
+      ? [toolKey(namespace, name), toolKey(undefined, `${namespace}${NAMESPACE_DELIMITER}${name}`),
+        toolKey(undefined, `${namespace}.${name}`)]
+      : [toolKey(undefined, name)];
+    for (const key of spellings) {
+      // A name declared both ways is not provably input-free.
+      inventory.set(key, (inventory.get(key) ?? true) && noInputs);
+    }
+  }
+}
+
+// Every function the client declared this turn, plus definitions that an
+// earlier client-executed tool_search loaded into history, mapped to whether
+// that function takes no inputs.
+export function functionToolInventory(tools, input) {
+  const inventory = new Map();
+  collectToolInventory(tools, inventory);
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      if (item?.type === "tool_search_output") collectToolInventory(item.tools, inventory);
+    }
+  }
+  return inventory;
+}
+
+function blankArgumentsAllowed(item, inventory, { unknownAllowed }) {
+  if (!(inventory instanceof Map)) return true;
+  const name = typeof item?.name === "string" ? item.name : undefined;
+  if (!name) return unknownAllowed;
+  const namespaced = typeof item.namespace === "string" && item.namespace
+    ? inventory.get(toolKey(item.namespace, name))
+    : undefined;
+  const known = namespaced ?? inventory.get(toolKey(undefined, name));
+  if (known === undefined) return unknownAllowed;
+  return known;
+}
+
+const UNEXECUTED_EMPTY_ARGUMENTS_OUTPUT =
+  "failed to parse function arguments: EOF while parsing a value at line 1 column 0";
+
+function functionCallOutputText(output) {
+  if (typeof output === "string") return output;
+  const parts = Array.isArray(output) ? output : Array.isArray(output?.content) ? output.content : undefined;
+  if (!parts || parts.length !== 1) return undefined;
+  return typeof parts[0]?.text === "string" ? parts[0].text : undefined;
+}
+
+// History that is already poisoned by #1066 holds a function_call with empty
+// arguments and Codex's own parse failure as its only output, which proves the
+// call never ran. Omit exactly those pairs from the forwarded request; never
+// invent arguments, and leave every other malformed pair to be refused.
+export function omitUnexecutedEmptyArgumentCalls(input) {
+  if (!Array.isArray(input)) return { input, omitted: 0 };
+  const outputsByCallId = new Map();
+  for (const item of input) {
+    if (item?.type !== "function_call_output" || typeof item.call_id !== "string") continue;
+    outputsByCallId.set(item.call_id, (outputsByCallId.get(item.call_id) || []).concat([item]));
+  }
+  const drop = new Set();
+  const callIdsSeen = new Map();
+  for (const item of input) {
+    if (item?.type === "function_call" && typeof item.call_id === "string") {
+      callIdsSeen.set(item.call_id, (callIdsSeen.get(item.call_id) || 0) + 1);
+    }
+  }
+  for (const item of input) {
+    if (item?.type !== "function_call" || !blankArguments(item.arguments)) continue;
+    if (typeof item.call_id !== "string" || callIdsSeen.get(item.call_id) !== 1) continue;
+    const outputs = outputsByCallId.get(item.call_id) || [];
+    if (outputs.length !== 1) continue;
+    if (functionCallOutputText(outputs[0].output)?.trim() !== UNEXECUTED_EMPTY_ARGUMENTS_OUTPUT) continue;
+    drop.add(item);
+    drop.add(outputs[0]);
+  }
+  if (!drop.size) return { input, omitted: 0 };
+  return { input: input.filter((item) => !drop.has(item)), omitted: drop.size / 2 };
+}
+
 export function preservesRawFunctionCallArguments(item, lookups) {
   return item?.type === "function_call" &&
     item.namespace === undefined &&
@@ -83,7 +201,10 @@ function jsonParseError(value) {
   }
 }
 
-function inspectFunctionCallArguments(item, { path, lookups } = {}) {
+function inspectFunctionCallArguments(
+  item,
+  { path, lookups, tools, completed = false, unknownAllowed = false } = {},
+) {
   if (item?.type === "custom_tool_call") return undefined;
   if (preservesRawFunctionCallArguments(item, lookups)) return undefined;
   const argumentsText = typeof item?.arguments === "string"
@@ -92,6 +213,17 @@ function inspectFunctionCallArguments(item, { path, lookups } = {}) {
       ? item.function.arguments
       : undefined;
   if (typeof argumentsText !== "string") return undefined;
+  if (blankArguments(argumentsText)) {
+    if (!completed) return undefined;
+    const identity = item?.name === undefined && typeof item?.function?.name === "string"
+      ? { ...item, name: item.function.name }
+      : item;
+    if (blankArgumentsAllowed(identity, tools, { unknownAllowed })) return undefined;
+    return {
+      ...describeFunctionCallIdentity(item, { path }),
+      jsonError: "empty arguments for a tool that takes inputs",
+    };
+  }
   if (functionCallArgumentsAreJson(argumentsText)) return undefined;
   return {
     ...describeFunctionCallIdentity(item, { path }),
@@ -99,7 +231,7 @@ function inspectFunctionCallArguments(item, { path, lookups } = {}) {
   };
 }
 
-function inspectChatToolCall(call, path) {
+function inspectChatToolCall(call, path, options) {
   if (!call || typeof call !== "object") return undefined;
   return inspectFunctionCallArguments(
     {
@@ -109,17 +241,21 @@ function inspectChatToolCall(call, path) {
       call_id: call.call_id ?? call.id,
       id: call.id,
     },
-    { path },
+    { ...options, path },
   );
 }
 
-export function findUnusableFunctionCallArguments(input, { lookups } = {}) {
+// Stored history: a tool absent from this turn's inventory may have been
+// removed since it ran, so only a call to a tool known to take inputs is
+// refused for empty arguments.
+export function findUnusableFunctionCallArguments(input, { lookups, tools } = {}) {
   if (!Array.isArray(input)) return undefined;
+  const options = { lookups, tools, completed: true, unknownAllowed: true };
   for (let index = 0; index < input.length; index += 1) {
     const item = input[index];
     const found = inspectFunctionCallArguments(item, {
+      ...options,
       path: `input[${index}]`,
-      lookups,
     });
     if (found) return found;
     const toolCalls = item?.tool_calls;
@@ -128,6 +264,7 @@ export function findUnusableFunctionCallArguments(input, { lookups } = {}) {
       const nested = inspectChatToolCall(
         toolCalls[callIndex],
         `input[${index}].tool_calls[${callIndex}]`,
+        options,
       );
       if (nested) return nested;
     }
@@ -135,19 +272,24 @@ export function findUnusableFunctionCallArguments(input, { lookups } = {}) {
   return undefined;
 }
 
-function inspectOutputItems(output, lookups) {
+function inspectOutputItems(output, lookups, tools, completed) {
   if (!Array.isArray(output)) return undefined;
   for (let index = 0; index < output.length; index += 1) {
     const found = inspectFunctionCallArguments(output[index], {
       path: `output[${index}]`,
       lookups,
+      tools,
+      completed: completed && output[index]?.status !== "in_progress",
     });
     if (found) return found;
   }
   return undefined;
 }
 
-export function findUnusableCompletedFunctionCall(event, { lookups } = {}) {
+// A model can only call what it was offered, so in a response an empty
+// argument string is accepted only for a declared tool that takes no inputs.
+// Without an inventory (`tools` undefined) empty arguments stay accepted.
+export function findUnusableCompletedFunctionCall(event, { lookups, tools } = {}) {
   if (!event || typeof event !== "object") return undefined;
   if (event.type === "response.function_call_arguments.done") {
     return inspectFunctionCallArguments(
@@ -159,24 +301,29 @@ export function findUnusableCompletedFunctionCall(event, { lookups } = {}) {
         id: event.item_id,
         namespace: event.namespace,
       },
-      { path: "function_call_arguments.done", lookups },
+      { path: "function_call_arguments.done", lookups, tools, completed: true },
     );
   }
   if (event.type === "response.output_item.done") {
     return inspectFunctionCallArguments(event.item, {
       path: "output_item.done",
       lookups,
+      tools,
+      completed: true,
     });
   }
   if (event.type === "response.completed" || event.type === "response.done") {
-    return inspectOutputItems(event.response?.output ?? event.output, lookups) ||
-      inspectOutputItems(event.output, lookups);
+    return inspectOutputItems(event.response?.output ?? event.output, lookups, tools, true) ||
+      inspectOutputItems(event.output, lookups, tools, true);
   }
+  // A non-streaming body has no event type; it is the finished response
+  // unless it says otherwise. Typed in-progress snapshots may hold openings.
+  const finishedBody = event.type === undefined && event.status !== "in_progress";
   if (Array.isArray(event.output)) {
-    return inspectOutputItems(event.output, lookups);
+    return inspectOutputItems(event.output, lookups, tools, finishedBody);
   }
   if (Array.isArray(event.response?.output)) {
-    return inspectOutputItems(event.response.output, lookups);
+    return inspectOutputItems(event.response.output, lookups, tools, finishedBody);
   }
   return undefined;
 }
@@ -315,24 +462,34 @@ function eventFromSseBlock(block) {
   }
 }
 
-export function invalidCompletedFunctionCallTransform(namespaces, contentType = "") {
+export function invalidCompletedFunctionCallTransform(
+  namespaces,
+  contentType = "",
+  { tools } = {},
+) {
   const type = String(contentType).toLowerCase();
   if (!type.includes("text/event-stream") && !type.includes("json")) return undefined;
   const lookups = namespaces ? buildNamespaceLookups(namespaces) : undefined;
-  return new InvalidCompletedFunctionCallTransform(lookups, type.includes("text/event-stream"));
+  return new InvalidCompletedFunctionCallTransform(
+    lookups,
+    type.includes("text/event-stream"),
+    tools,
+  );
 }
 
 export class InvalidCompletedFunctionCallTransform extends Transform {
   #lookups;
+  #tools;
   #eventStream;
   #buffer = Buffer.alloc(0);
   #passthrough = false;
   #namesByItemId = new Map();
   #heldCalls = new Map();
 
-  constructor(lookups, eventStream = true) {
+  constructor(lookups, eventStream = true, tools = undefined) {
     super();
     this.#lookups = lookups;
+    this.#tools = tools;
     this.#eventStream = eventStream;
   }
 
@@ -414,14 +571,26 @@ export class InvalidCompletedFunctionCallTransform extends Transform {
       : typeof event.item?.id === "string"
         ? event.item.id
         : undefined;
-    const knownName = itemId ? this.#namesByItemId.get(itemId) : undefined;
-    if (!knownName) return event;
+    const known = itemId ? this.#namesByItemId.get(itemId) : undefined;
+    if (!known) return event;
     let next = event;
     if (typeof event.name !== "string" || !event.name) {
-      next = { ...next, name: knownName };
+      next = { ...next, name: known.name };
+      if (known.namespace && next.namespace === undefined) {
+        next = { ...next, namespace: known.namespace };
+      }
     }
     if (event.item && (typeof event.item.name !== "string" || !event.item.name)) {
-      next = { ...next, item: { ...event.item, name: knownName } };
+      next = {
+        ...next,
+        item: {
+          ...event.item,
+          name: known.name,
+          ...(known.namespace && event.item.namespace === undefined
+            ? { namespace: known.namespace }
+            : {}),
+        },
+      };
     }
     return next;
   }
@@ -465,7 +634,10 @@ export class InvalidCompletedFunctionCallTransform extends Transform {
     if (event?.type === "response.output_item.added" && event.item?.type === "function_call") {
       const itemId = typeof event.item.id === "string" ? event.item.id : undefined;
       if (itemId && typeof event.item.name === "string") {
-        this.#namesByItemId.set(itemId, event.item.name);
+        this.#namesByItemId.set(itemId, {
+          name: event.item.name,
+          namespace: typeof event.item.namespace === "string" ? event.item.namespace : undefined,
+        });
       }
     }
     event = this.#withKnownName(event);
@@ -475,7 +647,7 @@ export class InvalidCompletedFunctionCallTransform extends Transform {
         this.push(original);
         return;
       }
-      const invalid = findUnusableCompletedFunctionCall(event, { lookups: this.#lookups });
+      const invalid = findUnusableCompletedFunctionCall(event, { lookups: this.#lookups, tools: this.#tools });
       if (invalid) {
         this.#dropHeld(holdId);
         this.#reject(invalid);
@@ -483,7 +655,7 @@ export class InvalidCompletedFunctionCallTransform extends Transform {
       if (isFunctionCallCompletion(event)) this.#flushHeld(holdId);
       return;
     }
-    const invalid = findUnusableCompletedFunctionCall(event, { lookups: this.#lookups });
+    const invalid = findUnusableCompletedFunctionCall(event, { lookups: this.#lookups, tools: this.#tools });
     if (invalid) this.#reject(invalid);
     if (
       event?.type === "response.completed"
@@ -521,7 +693,7 @@ export class InvalidCompletedFunctionCallTransform extends Transform {
       this.#releaseJson();
       return;
     }
-    const invalid = findUnusableCompletedFunctionCall(payload, { lookups: this.#lookups });
+    const invalid = findUnusableCompletedFunctionCall(payload, { lookups: this.#lookups, tools: this.#tools });
     if (invalid) this.#reject(invalid);
     this.push(this.#buffer);
     this.#buffer = Buffer.alloc(0);

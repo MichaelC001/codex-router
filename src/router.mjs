@@ -245,8 +245,10 @@ import {
 import {
   INVALID_FUNCTION_CALL_ARGUMENTS_CODE,
   findUnusableFunctionCallArguments,
+  functionToolInventory,
   historyFunctionCallArgumentsError,
   invalidCompletedFunctionCallTransform,
+  omitUnexecutedEmptyArgumentCalls,
   isInvalidFunctionCallArgumentsError,
 } from "./invalid-function-call.mjs";
 import { describeTransportFailure } from "./transport-failure.mjs";
@@ -4633,8 +4635,22 @@ async function handleResponses(request, response, requestUrl) {
     route = registeredRoute && routeProviderEnabled(registeredRoute.provider)
       ? registeredRoute
       : undefined;
+    let functionTools;
     if (route) {
-      const invalidHistoryCall = findUnusableFunctionCallArguments(payload.input);
+      // History already poisoned by #1066 carries a call with empty arguments
+      // whose only output is Codex's own parse failure; it never ran, so it is
+      // omitted instead of refusing every later turn.
+      const unexecuted = omitUnexecutedEmptyArgumentCalls(payload.input);
+      if (unexecuted.omitted) {
+        payload = { ...payload, input: unexecuted.input };
+        console.error(
+          `[codex-router] omitted unexecuted empty-argument function calls model=${route.slug} count=${unexecuted.omitted}`,
+        );
+      }
+      functionTools = functionToolInventory(payload.tools, payload.input);
+      const invalidHistoryCall = findUnusableFunctionCallArguments(payload.input, {
+        tools: functionTools,
+      });
       if (invalidHistoryCall) {
         writeJson(response, 400, historyFunctionCallArgumentsError(invalidHistoryCall));
         console.error(
@@ -5419,7 +5435,9 @@ async function handleResponses(request, response, requestUrl) {
       // error, and before the empty-completion guard so the completing snapshot
       // is withheld even if the opening item already counted as content.
       const invalidFunctionCall = route
-        ? invalidCompletedFunctionCallTransform(flattenedNamespaces, contentType)
+        ? invalidCompletedFunctionCallTransform(flattenedNamespaces, contentType, {
+          tools: functionTools,
+        })
         : undefined;
       if (invalidFunctionCall) transforms.push(invalidFunctionCall);
       const repetitionGuard = glmRepetitionGuardTransform(route, contentType);
