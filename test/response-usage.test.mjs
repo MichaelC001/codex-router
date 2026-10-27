@@ -12,6 +12,55 @@ import {
   tokenUsageFromPayload,
 } from "../src/response-usage.mjs";
 
+test("cumulative billing is separated from client context across JSON and SSE", async () => {
+  const usage = {
+    input_tokens: 572089, output_tokens: 4820, total_tokens: 576909,
+    input_tokens_details: { cached_tokens: 500000, other: 7 },
+    billed_input_tokens: 800000,
+  };
+  const response = { usage, provider_specific_fields: { grok_context_input_tokens: 58000 } };
+  for (const contentType of ["application/json", "text/event-stream", ""]) {
+    const isJson = contentType === "application/json";
+    const payload = isJson ? response : { type: "response.completed", response };
+    const source = isJson ? JSON.stringify(payload) : `data: ${JSON.stringify(payload)}\r\n\r\ndata: [DONE]\r\n\r\n`;
+    const transform = new ResponseUsageTransform(contentType, { cumulativeInputUsage: true });
+    const body = await passThrough(transform, [source.slice(0, 17), source.slice(17)]);
+    const delivered = isJson ? JSON.parse(body) : JSON.parse(body.split("\r\n")[0].slice(6)).response;
+    assert.equal(delivered.usage.input_tokens, 58000);
+    assert.equal(delivered.usage.total_tokens, 62820);
+    assert.equal(delivered.usage.input_tokens_details, undefined, "unknown current-context cache omits the optional breakdown, not a required member");
+    assert.equal(transform.tokenUsage().inputTokens, 572089);
+    assert.equal(transform.tokenUsage().cachedInputTokens, 500000);
+    assert.equal(transform.tokenUsage().billedInputTokens, 800000);
+    assert.equal(transform.substitutedInputTokens(), 58000);
+    // The same metadata on any other provider must not alter its usage.
+    const ordinary = new ResponseUsageTransform(contentType);
+    assert.equal(await passThrough(ordinary, [source]), source);
+  }
+});
+
+test("cumulative input requires trusted numeric context metadata and numeric usage", async () => {
+  for (const estimate of [undefined, null, "58000", -1, 0, 1.5]) {
+    const payload = { usage: { input_tokens: 572089, output_tokens: 2 }, provider_specific_fields: { grok_context_input_tokens: estimate } };
+    const source = JSON.stringify(payload);
+    const transform = new ResponseUsageTransform("application/json", { cumulativeInputUsage: true, estimatedInputTokens: 2000 });
+    assert.equal(await passThrough(transform, [source]), source, "pre-translation fallback must not override the provider request");
+  }
+  for (const input of [undefined, null, "572089", -1]) {
+    const payload = { usage: { input_tokens: input, output_tokens: 2 }, provider_specific_fields: { grok_context_input_tokens: 58000 } };
+    const source = JSON.stringify(payload);
+    const transform = new ResponseUsageTransform("application/json", { cumulativeInputUsage: true });
+    assert.equal(await passThrough(transform, [source]), source);
+  }
+});
+
+test("small cumulative requests still have a context estimate", () => {
+  const request = JSON.stringify({ input: [{ role: "user", content: "hello" }] });
+  assert.equal(estimateInputTokens(request), undefined);
+  const estimate = estimateInputTokens(request, { minimumTokens: 0 });
+  assert.ok(estimate > 0 && estimate < 1000);
+});
+
 test("DeepSeek image bytes do not fill the prompt-token estimate", () => {
   const body = JSON.stringify({
     input: [{ role: "user", content: [
@@ -342,13 +391,14 @@ test("billed counts are added up like every other measurement", () => {
       billedOutputTokens: 270,
     },
   );
-  // Reported by one attempt and not the other, exactly like the cache count.
+  // A billed component overrides its own attempt; the other attempt still
+  // contributes its reported usage instead of becoming free.
   assert.deepEqual(
     mergeTokenUsage(
       { inputTokens: 10, outputTokens: 1, totalTokens: 11 },
       { inputTokens: 10, outputTokens: 1, totalTokens: 11, billedInputTokens: 25 },
     ),
-    { inputTokens: 20, outputTokens: 2, totalTokens: 22, billedInputTokens: 25 },
+    { inputTokens: 20, outputTokens: 2, totalTokens: 22, billedInputTokens: 35 },
   );
   // Reported by neither, the key stays absent rather than becoming a zero:
   // `billedInputTokens ?? inputTokens` has to fall through to the reported one.
@@ -358,11 +408,18 @@ test("billed counts are added up like every other measurement", () => {
   );
   assert.equal("billedInputTokens" in plain, false);
   assert.equal("billedOutputTokens" in plain, false);
-  // A measured zero survives.
+  // A measured zero overrides only its own attempt.
   assert.equal(
     mergeTokenUsage(
       { inputTokens: 1, outputTokens: 1, totalTokens: 2, billedOutputTokens: 0 },
       { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    ).billedOutputTokens,
+    1,
+  );
+  assert.equal(
+    mergeTokenUsage(
+      { inputTokens: 1, outputTokens: 1, totalTokens: 2, billedOutputTokens: 0 },
+      { inputTokens: 1, outputTokens: 1, totalTokens: 2, billedOutputTokens: 0 },
     ).billedOutputTokens,
     0,
   );

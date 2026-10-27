@@ -34,6 +34,7 @@ import {
   routedModel,
 } from "../src/catalog.mjs";
 import { sidecarSearchAvailable } from "../src/search-capability.mjs";
+import { userModelEntry } from "../src/user-models.mjs";
 
 const template = {
   slug: "gpt-5.5",
@@ -225,6 +226,50 @@ test("routed models rewrite GPT identity text to the external model name", () =>
   assert.doesNotMatch(model.model_messages.instructions_template, /GPT-5/);
   assert.equal(model.model_messages.instructions_variables.personality_default, "");
   assert.equal(model.multi_agent_version, "v2");
+});
+
+test("grok family rewrites workspace reads onto its own tools", () => {
+  const workspace = "- When you search for text or files, you reach first for `rg` or `rg --files`; they are much faster than alternatives like `grep`. If `rg` is unavailable, you use the next best tool without fuss.\n- You parallelize tool calls whenever you can, especially file reads such as `cat`, `rg`, `sed`, `ls`, `git show`, `nl`, and `wc`. You use `multi_tool_use.parallel` for that parallelism, and only that. Do not chain shell commands with separators like `echo \"====\";`; the output becomes noisy in a way that makes the user\u2019s side of the conversation worse.\n- Use `apply_patch` for manual code edits. Do not create or edit files with `cat` or other shell write tricks. Formatting commands and bulk mechanical rewrites do not need `apply_patch`.\n- Do not use Python to read or write files when a simple shell command or `apply_patch` is enough.\n- Treat ordinary local filesystem paths as files, never as MCP resource URIs. Inspect local files with a filesystem tool that is present in this request's menu.";
+  const native = {
+    ...template,
+    base_instructions: `You are Codex, a coding agent based on GPT-5.\n${workspace}`,
+    model_messages: {
+      instructions_template: `You are Codex, a coding agent based on GPT-5.\n${workspace}`,
+      instructions_variables: { personality_default: "" },
+    },
+  };
+  const grok47 = {
+    ...grok,
+    slug: "grok-oauth/grok-4.7",
+    displayName: "Grok 4.7 (OAuth)",
+    instructionOverlay: "filesystem-mcp-discipline",
+  };
+  const other = {
+    ...grok47,
+    slug: "deepseek/deepseek-v4-pro",
+    displayName: "DeepSeek V4 Pro",
+    gatewayModel: "deepseek-v4-pro",
+  };
+
+  const model = routedModel(native, grok47);
+  assert.match(model.base_instructions, /based on Grok 4\.7/);
+  assert.match(model.base_instructions, /read files with `read_file`/);
+  assert.match(model.base_instructions, /separate tool calls in the same response/);
+  assert.match(model.base_instructions, /replace_lines` for manual edits/);
+  assert.match(model.base_instructions, /not for paging through files/);
+  assert.match(model.base_instructions, /`multi_tool_use\.parallel` is not available/);
+  assert.doesNotMatch(model.base_instructions, /You use `multi_tool_use\.parallel` for that parallelism/);
+  assert.doesNotMatch(model.base_instructions, /such as exec_command, to inspect/);
+  assert.doesNotMatch(model.base_instructions, /filesystem tool that is present/);
+  assert.match(model.model_messages.instructions_template, /read files with `read_file`/);
+  assert.match(model.model_messages.instructions_template, /`multi_tool_use\.parallel` is not available/);
+  assert.doesNotMatch(model.model_messages.instructions_template, /You use `multi_tool_use\.parallel` for that parallelism/);
+  assert.doesNotMatch(model.base_instructions, /GPT-5/);
+
+  const untouched = routedModel(native, other);
+  assert.match(untouched.base_instructions, /based on DeepSeek V4 Pro/);
+  assert.match(untouched.base_instructions, /multi_tool_use\.parallel/);
+  assert.doesNotMatch(untouched.base_instructions, /read files with `read_file`/);
 });
 
 test("routed models can borrow native behavior instructions without inheriting capabilities", () => {
@@ -757,6 +802,44 @@ test("login-free catalog keeps overflow models visible under their own slugs", (
   const bySlug = new Map(models.map((model) => [model.slug, model]));
   assert.equal(bySlug.get("kimi-oauth/kimi-for-coding").visibility, "list");
   assert.equal(bySlug.get("grok-oauth/grok-4.5").visibility, "hide");
+});
+
+test("login-free aliases skip hidden routes before assigning native slots", () => {
+  const paid = { ...grok, slug: "openrouter/claude-fable-5.1" };
+  const selected = { ...grok, slug: "openrouter/selected:free", displayName: "Selected free model" };
+  const { models, aliases } = buildLoginFreeCatalog(
+    { models: [template] },
+    [paid, selected],
+    { hiddenModels: new Set([paid.slug]) },
+  );
+
+  assert.deepEqual(aliases, { "gpt-5.5": selected.slug });
+  assert.equal(models.find((model) => model.slug === "gpt-5.5").display_name, selected.displayName);
+  assert.ok(models.some((model) => model.slug === paid.slug), "retain canonical routes for the picker overlay");
+});
+
+test("login-free aliases honour explicit selections, including an empty selection", () => {
+  const paid = { ...grok, slug: "openrouter/claude-fable-5.1" };
+  const selected = { ...grok, slug: "openrouter/selected:free" };
+  const native = { models: [template] };
+  const routes = [paid, selected];
+
+  assert.deepEqual(
+    buildLoginFreeCatalog(native, routes, { visibleModels: new Set([selected.slug]) }).aliases,
+    { "gpt-5.5": selected.slug },
+  );
+  assert.deepEqual(
+    buildLoginFreeCatalog(native, routes, { visibleModels: new Set() }).aliases,
+    {},
+  );
+  assert.deepEqual(
+    buildLoginFreeCatalog(native, routes, {
+      visibleModels: new Set([selected.slug]),
+      hiddenModels: new Set([selected.slug]),
+    }).aliases,
+    {},
+    "a hidden decision wins over a conflicting positive selection",
+  );
 });
 
 function withCredentialEnvironment(kimiHome, run) {
@@ -1595,6 +1678,67 @@ test(
     }
   },
 );
+
+test("catalog publication assigns login-free slots only to selected routes and preserves signed-in natives", { timeout: 60_000 }, () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-selected-alias-"));
+  const stateDir = path.join(codexHome, "router-state");
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const config = 'model = "gpt-5.6-sol"\n';
+  const selectedSlug = "openrouter/selected:free";
+  const paidSlug = "openrouter/claude-fable-5.1";
+  const put = (name, value) => writeFileSync(
+    path.join(stateDir, name), `${JSON.stringify(value)}\n`, { mode: 0o600 },
+  );
+  writeFileSync(path.join(codexHome, "config.toml"), config, { mode: 0o600 });
+  writeFileSync(path.join(stateDir, "openrouter-api-key.secret"), "test-key\n", { mode: 0o600 });
+  put("enabled-providers.json", { version: 1, providers: ["openrouter"] });
+  put("user-models.json", { version: 1, models: [userModelEntry({
+    providerId: "openrouter",
+    upstreamId: "selected:free",
+    priority: 100,
+    metadata: { displayName: "Selected free model", isFree: true },
+  })] });
+  put("model-picker.json", {
+    version: 1, hidden: [paidSlug], visible: [selectedSlug], seeded: [paidSlug, selectedSlug],
+  });
+
+  try {
+    const env = {
+      ...process.env,
+      CODEX_BIN: writeCatalogCodexStub(codexHome),
+      CODEX_HOME: codexHome,
+      CODEX_ROUTER_STATE_DIR: stateDir,
+      MODEL_ROUTER_STATE_DIR: stateDir,
+      MODEL_ROUTER_TARGET: "codex",
+    };
+    const publish = (loginFree) => {
+      const result = spawnSync(process.execPath, [path.join(repoRoot, "src", "catalog.mjs"), "--refresh-native"], {
+        cwd: repoRoot, encoding: "utf8", env: { ...env, MODEL_ROUTER_LOGIN_FREE: loginFree },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      return JSON.parse(readFileSync(path.join(stateDir, "merged-models.json"), "utf8")).models;
+    };
+    const aliased = publish("1");
+    assert.deepEqual(
+      JSON.parse(readFileSync(path.join(stateDir, "native-aliases.json"), "utf8")).aliases,
+      { "gpt-5.6-sol": selectedSlug },
+    );
+    assert.equal(aliased.find((model) => model.slug === "gpt-5.6-sol").display_name, "Selected free model");
+    assert.equal(aliased.find((model) => model.slug === "gpt-5.6-sol").visibility, "list");
+    assert.equal(aliased.find((model) => model.slug === paidSlug).visibility, "hide");
+
+    const signedIn = publish("0");
+    assert.deepEqual(
+      JSON.parse(readFileSync(path.join(stateDir, "native-aliases.json"), "utf8")).aliases,
+      {},
+    );
+    assert.equal(signedIn.find((model) => model.slug === "gpt-5.6-sol").display_name, "GPT-5.6 Sol");
+    assert.equal(signedIn.find((model) => model.slug === "gpt-5.6-sol").visibility, "list");
+    assert.equal(readFileSync(path.join(codexHome, "config.toml"), "utf8"), config);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
 
 test("routed-first publishes every routed model ahead of the natives and shifts the natives by that count", () => {
   const native = {
