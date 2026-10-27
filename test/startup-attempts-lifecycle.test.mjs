@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { executeStartupFixture, startupFixturePaths } from "./startup-attempts-fixture.mjs";
+import { awaitChildExits } from "../src/bounded-teardown.mjs";
 
 const root = process.env.PR895_REVIEW_SOURCE_DIR
   || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -110,6 +111,7 @@ async function run({ foreground = false, disabled = false, mode = "healthy", see
     }) },
     "./antigravity-oauth-status.mjs": { antigravityOAuthStartupState: () => ({ startForwarder: false }), antigravityOAuthStatus: () => ({}) },
     "./antigravity-probe-activation.mjs": { attemptAntigravityProbePromotionAfterReadiness: async () => true },
+    "./bounded-teardown.mjs": { awaitChildExits },
     "./spawnable-command.mjs": { spawnableCommand: (command, args) => ({ command, args, options: {} }) },
     "./ollama-runtime.mjs": { ensureOllamaHeadless: async () => {} },
     "./venv-runtime.mjs": { venvRuntimeOutcome: () => ({ kind: "ok" }), venvRuntimeProblem: () => undefined },
