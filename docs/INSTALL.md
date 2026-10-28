@@ -611,8 +611,8 @@ Windows:
 ./codex-router.ps1 rollback
 ```
 
-The updater requires the recognized GitHub origin and a checkout with no edits
-to tracked files. It fetches `origin/main`, retains the current revision under
+The managed checkout updater requires the recognized GitHub origin and a
+checkout with no edits to tracked files. It fetches `origin/main`, retains the current revision under
 `refs/codex-router/rollback`, fast-forwards, and reinstalls. A failed install
 automatically checks out and reinstalls the previous revision. `update check`
 fetches remote Git metadata and compares revisions without reinstalling or
@@ -626,11 +626,24 @@ installers take the same escape: `--force` for the `curl | sh` script and
 `-Force` for the PowerShell installer. Every force path discards tracked edits
 only; none of them delete untracked files.
 
+### Managed checkout updater
+
 The updater restores the previous revision and attempts to reinstall it when
 the new installation fails. If automatic recovery also fails, it reports both
 errors and the previous commit instead of claiming recovery succeeded. Rollback
 can leave HEAD detached at the restored revision; the next updater switches it
 back to `main`. A named development branch is still refused.
+
+### Bootstrap setup
+
+The source bootstrap installers run guided setup after fetching the checkout.
+When that setup exits 2 (for example, after a declined prompt or a missing
+credential), the update is kept. Re-run setup to finish configuring, or use the
+rollback command to return to the retained revision.
+
+For other setup failures, the bootstrap restores the previous source revision
+when one was available, leaving HEAD detached at that commit. The next bootstrap
+installer switches back to `main` before fetching.
 
 For checkout installs, the reinstall skips dependency work whose inputs are
 unchanged, so an update that carries no `package-lock.json` or LiteLLM pin
