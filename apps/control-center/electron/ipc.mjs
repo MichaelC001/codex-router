@@ -1589,6 +1589,8 @@ export function registerIpcHandlers({
     ["provider-usage"],
     { timeoutMs: PROVIDER_USAGE_TIMEOUT_MS },
   ));
+  // free/auto's members, drains and local usage rows; read-only and local.
+  handle("getFreePool", async () => runJson(["free-pool", "status"], { timeoutMs: 20_000 }));
   handle("getLocalModels", async () => runJson(["local-models", "list", "--json"], { timeoutMs: 20_000 }));
   handle("getVisionBridge", async () => runJson(["vision-bridge", "status"], { timeoutMs: 20_000 }));
   handle("getToolResultAging", async () => runJson(["tool-result-aging", "status"], { timeoutMs: 20_000 }));
